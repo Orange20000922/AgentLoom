@@ -41,7 +41,7 @@ int Fail(const std::string& msg) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <config.json> [user_prompt]\n";
+        std::cerr << "Usage: " << argv[0] << " <config.json> [user_prompt] [max_tokens]\n";
         std::cerr << "       (reads llm.* from config.json, sends one chat completion)\n";
         return 2;
     }
@@ -49,6 +49,15 @@ int main(int argc, char** argv) {
     const std::string config_path = argv[1];
     const std::string user_prompt = (argc >= 3) ? argv[2]
                                                 : "你好，用一句话介绍你自己。";
+    int max_tokens = 0;
+    if (argc >= 4) {
+        try {
+            max_tokens = std::stoi(argv[3]);
+        } catch (const std::exception&) {
+            return Fail("max_tokens must be a non-negative integer");
+        }
+        if (max_tokens < 0) return Fail("max_tokens must be a non-negative integer");
+    }
 
     MultimodalServerOptions options;
     try {
@@ -136,6 +145,7 @@ int main(int argc, char** argv) {
                                  prompt_store.Get("smoke").value()});
     }
     req.messages.push_back({agent::llm::ChatRole::User, user_prompt});
+    req.max_tokens = max_tokens;
 
     std::cout << "[smoke] sending request..." << std::endl;
     auto start = std::chrono::steady_clock::now();
@@ -154,6 +164,9 @@ int main(int argc, char** argv) {
     std::cout << "[smoke] tokens: prompt=" << r.prompt_tokens
               << " completion=" << r.completion_tokens
               << " total=" << r.total_tokens << "\n";
-    std::cout << "[smoke] reply: " << r.content << "\n";
+    std::cout << "[smoke] finish_reason: " << r.finish_reason << "\n";
+    std::cout << "[smoke] reply_bytes: " << r.content.size() << "\n";
+    std::cout << "[smoke] reasoning_bytes: "
+              << (r.reasoning_content ? r.reasoning_content->size() : 0) << "\n";
     return 0;
 }

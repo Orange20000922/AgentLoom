@@ -179,7 +179,15 @@ install(FILES "${HF_TOKENIZERS_STATICLIB_PATH}" DESTINATION "${CMAKE_INSTALL_LIB
 
 install(DIRECTORY "${BERT_FAISS_ROOT}/include/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AgentLoom/third_party/faiss")
-install(DIRECTORY "${BERT_EIGEN_ROOT}/"
+install(DIRECTORY "${BERT_EIGEN_ROOT}/Eigen"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AgentLoom/third_party/eigen")
+if(IS_DIRECTORY "${BERT_EIGEN_ROOT}/unsupported/Eigen")
+    install(DIRECTORY "${BERT_EIGEN_ROOT}/unsupported/Eigen"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AgentLoom/third_party/eigen/unsupported")
+endif()
+install(FILES
+    "${BERT_EIGEN_ROOT}/COPYING.MPL2"
+    "${BERT_EIGEN_ROOT}/COPYING.BSD"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AgentLoom/third_party/eigen")
 if(WIN32)
     install(FILES ${_agentloom_onnx_runtime_files} DESTINATION "${CMAKE_INSTALL_BINDIR}")

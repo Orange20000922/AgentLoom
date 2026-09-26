@@ -4,9 +4,10 @@ This directory controls a Linux or WSL2 build without changing the root Windows-
 The scripts create a generated Linux source tree under `build/linux-source`, apply the same Linux
 dependency shim used by CI, and build Linux ELF test artifacts.
 
-The default flow does not build the full multimodal inference server because llama.cpp must use a
-CUDA binary release. It does build the CPU BERT emotion server, Persona service tests, document/vector
-tests, the Persona Gateway E2E server, and the formal Gateway server.
+The default flow uses the same Core/SDK Release profile as CI. Local LLM and Media are disabled, so
+the first build does not require llama.cpp, OpenCV, or GStreamer. It still builds the CPU BERT emotion
+server, core service tests, document/vector tests, the Persona Gateway E2E server, and the formal
+Gateway server.
 
 ```bash
 bash linux/scripts/bootstrap_toolchain.sh
@@ -34,10 +35,20 @@ cmake -S linux -B build/linux-control -G Ninja
 cmake --build build/linux-control --target linux_all
 ```
 
+To enable Media without Local LLM, install the additional toolchain package and configure explicitly:
+
+```bash
+bash linux/scripts/bootstrap_toolchain.sh --media
+bash linux/scripts/prepare_deps.sh
+bash linux/scripts/configure.sh --media
+bash linux/scripts/build.sh
+```
+
 To enable the inference target, provide a compatible Linux CUDA llama.cpp release archive:
 
 ```bash
 export LLAMA_CPP_CUDA_URL="https://.../llama-<tag>-bin-ubuntu-cuda-<version>-x64.tar.gz"
+bash linux/scripts/bootstrap_toolchain.sh --inference
 bash linux/scripts/prepare_deps.sh
 bash linux/scripts/configure.sh --inference
 bash linux/scripts/build.sh --inference
@@ -72,6 +83,10 @@ The scripts derive paths from the current checkout root, so both `/mnt/d/...` an
 This avoids Ubuntu/WSL externally-managed Python restrictions and keeps `zstandard` out of the
 system Python installation. Rust uses the repository `rust-toolchain.toml`, matching CI's stable,
 minimal toolchain with `rustfmt` and `clippy` components.
+
+Faiss is downloaded from a pinned conda-forge CPU/OpenBLAS package, verified by SHA-256, and unpacked
+with the same versioned helper used by Windows. Its normalized directory includes the real Faiss
+version (`faiss-1.10.0-cpu-linux`) rather than a different display version.
 
 gRPC is still built through vcpkg for ABI consistency, but the scripts use a release-only triplet,
 use the same release-only triplet for host code-generation tools,

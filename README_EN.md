@@ -146,42 +146,71 @@ Requirements:
 - Prebuilt or external ONNX Runtime, llama.cpp with mtmd, OpenCV, SQLite, Faiss, Eigen, MKL, and HuggingFace Tokenizers C API packages
 - **Toolchain note:** Windows builds must align the CMake generator, MSVC toolset, CRT configuration, and vcpkg/prebuilt dependency ABI. If dependencies are built with v145, the host must also use VS2026/v145. The ABI guard rejects known Debug/Release CRT conflicts, and release builds can enable `AGENT_LLAMA_STRICT_TOOLSET_ABI=ON` to require toolset alignment.
 
-The local `deps/` and `vcpkg_installed/` directories are not distributed with the source. Linux scripts prepare the required packages. On Windows, keep the CMake generator, MSVC toolset, and vcpkg ABI aligned.
+The local `deps/` and `vcpkg_installed/` directories are not distributed with the source. The dependency scripts download and verify the Core/SDK inputs, including ONNX Runtime, SQLite, Boost, Eigen, Faiss, and MKL. llama.cpp and GStreamer are optional external SDKs. See [`CONTRIBUTE.md`](CONTRIBUTE.md) for the complete contributor workflow.
 
 ### Windows
 
-Use a CMake version that supports the VS2026 generator. Check the executable resolved from PATH with `cmake --version` and `cmake --help`:
+Use a CMake version that supports the VS2026 generator. Check the executable resolved from PATH with `cmake --version` and `cmake --help`. The recommended Core/SDK Release flow is:
 
 ```powershell
-cmake -B build/x64-Release `
-  -G "Visual Studio 18 2026" -A x64 `
-  -DCMAKE_CONFIGURATION_TYPES=Release `
-  -DBERT_VCPKG_TRIPLET=x64-windows `
-  -DBERT_USE_ONNXRUNTIME_GPU=OFF `
-  -DLLAMA_CPP_ROOT="<path-to-llama.cpp>" `
-  -DLLAMA_CPP_BUILD="<path-to-llama.cpp-build>"
+.\windows\scripts\prepare_deps.ps1
+.\windows\scripts\configure.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Tests `
+  -Generator "Visual Studio 18 2026" `
+  -Triplet x64-windows-release
 
-cmake --build build/x64-Release `
-  --config Release --parallel
+.\windows\scripts\build.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Config Release
+
+.\windows\scripts\test.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Label ci `
+  -Exclude "ReloadBatchCycle|RedisV2Batches"
+```
+
+Windows CI uses the same Core/SDK switches: `AGENTLOOM_BUILD_LOCAL_LLM=OFF` and
+`AGENTLOOM_BUILD_MEDIA=OFF`. See [`windows/README.md`](windows/README.md) and
+[`CONTRIBUTE.md`](CONTRIBUTE.md) for Media, Local LLM, and full multimodal configurations.
+
+Install the SDK and validate a downstream consumer:
+
+```powershell
+cmake --install build\x64-Release-All-v145 `
+  --config Release --prefix build\agentloom-install
+.\windows\scripts\verify_package.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -InstallDir build\agentloom-install `
+  -ConsumerBuildDir build\windows-package-consumer `
+  -Generator "Visual Studio 18 2026"
 ```
 
 ### Linux / WSL2
 
-The default path builds the CPU runtime, gateway, emotion server, and tests. The VLM server additionally requires a prepared CUDA llama.cpp build.
+The default path builds the Core/SDK Release profile, CPU runtime, gateway, emotion server, and tests. Local LLM and Media are disabled by default.
 
 ```bash
-linux/scripts/bootstrap_toolchain.sh
-linux/scripts/prepare_deps.sh
-linux/scripts/configure.sh
-linux/scripts/build.sh
-linux/scripts/test.sh
+bash linux/scripts/bootstrap_toolchain.sh
+bash linux/scripts/prepare_deps.sh
+bash linux/scripts/configure.sh
+bash linux/scripts/build.sh
+bash linux/scripts/check_artifacts.sh
+bash linux/scripts/test.sh
 
 # Optional VLM inference target
-linux/scripts/configure.sh --inference
-linux/scripts/build.sh --inference
+bash linux/scripts/configure.sh --inference
+bash linux/scripts/build.sh --inference
 ```
 
 Linux dependencies are installed under `build/linux-vcpkg-installed`, separate from the Windows root `vcpkg_installed/`.
+`linux/scripts/test.sh` also installs the SDK and builds an independent package consumer by default; pass `--skip-package` to run only CTest.
+
+To verify the installed package separately:
+
+```bash
+bash linux/scripts/verify_package.sh
+```
 
 ## Configuration and Startup
 
@@ -232,20 +261,10 @@ Public examples contain placeholder model paths. The gateway example expects `AG
 
 CMake tests cover core infrastructure, TLS/HTTP, asynchronous LLM/emotion, configuration, SQLite, vector retrieval and batch coordination, semantic cache, documents, memory, media/IPC, persona/gateway behavior, and gRPC boundaries. Cross-process E2E and standalone benchmark targets are also included. The exact count evolves with the codebase and is not hard-coded in this README.
 
-```powershell
-cmake -B build/x64-Release-Tests-v145 `
-  -G "Visual Studio 18 2026" -A x64 `
-  -DBERT_BUILD_TESTS=ON `
-  -DBERT_VCPKG_TRIPLET=x64-windows `
-  -DBERT_USE_ONNXRUNTIME_GPU=OFF `
-  -DLLAMA_CPP_ROOT="<path-to-llama.cpp>" `
-  -DLLAMA_CPP_BUILD="<path-to-llama.cpp-build>"
-
-cmake --build `
-  build/x64-Release-Tests-v145 --config Release --parallel
-
-ctest --test-dir build/x64-Release-Tests-v145 `
-  -C Release --output-on-failure
+```bash
+bash linux/scripts/configure.sh
+bash linux/scripts/build.sh
+bash linux/scripts/test.sh
 ```
 
 ## Extension Boundary

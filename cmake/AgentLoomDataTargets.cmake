@@ -166,6 +166,8 @@ if(BERT_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS "ci;unit;semantic-cache")
 
+    copy_runtime_files(semantic_cache_tests ${VCPKG_RUNTIME_DLLS})
+
     add_executable(document_tests
         tests/document/ooxml_extractor_test.cpp
     )

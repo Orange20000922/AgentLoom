@@ -104,6 +104,8 @@ if(BERT_BUILD_TESTS)
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS "ci;unit;core")
 
+    copy_runtime_files(core_tests ${VCPKG_RUNTIME_DLLS})
+
     add_executable(media_inference_tests
         tests/media/grpc_vlm_vision_client_test.cpp
         tests/media/inference_frame_backlog_test.cpp
@@ -164,6 +166,8 @@ if(BERT_BUILD_TESTS)
     gtest_discover_tests(net_tests
         DISCOVERY_MODE PRE_TEST
         PROPERTIES LABELS "ci;unit;net")
+
+    copy_runtime_files(net_tests ${VCPKG_RUNTIME_DLLS})
 
     if(TARGET agent_media)
         add_executable(media_tests

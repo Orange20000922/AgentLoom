@@ -11,6 +11,7 @@ triplets/*
 !triplets/ci/
 triplets/ci/*
 !triplets/ci/x64-linux-release.cmake
+!triplets/ci/x64-windows-release.cmake
 #vcpkg安装包和依赖
 vcpkg_installed/
 vcpkg/

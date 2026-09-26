@@ -33,7 +33,10 @@ protected:
                 .pool_size = 2
             });
         auto redis_status = redis_pool_->Start();
-        ASSERT_TRUE(redis_status.ok()) << redis_status.message();
+        if (!redis_status.ok()) {
+            // Start() 内部执行 Redis PING；服务未启动时跳过外部依赖测试。
+            GTEST_SKIP() << "Redis PING failed: " << redis_status.message();
+        }
 
         user_uuid_ = "test_user_reload_cycle_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
 

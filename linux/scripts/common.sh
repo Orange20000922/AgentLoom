@@ -38,11 +38,9 @@ EIGEN_VERSION="${EIGEN_VERSION:-5.0.1}"
 EIGEN_ROOT="$DEPS_DIR/eigen-$EIGEN_VERSION"
 EIGEN_URL="https://gitlab.com/libeigen/eigen/-/archive/$EIGEN_VERSION/eigen-$EIGEN_VERSION.zip"
 
-FAISS_ROOT="$DEPS_DIR/faiss-1.14.1-cpu-linux"
+FAISS_ROOT="$DEPS_DIR/faiss-1.10.0-cpu-linux"
 FAISS_URL="${FAISS_URL:-https://conda.anaconda.org/conda-forge/linux-64/libfaiss-1.10.0-cpu_openblas_hfcc2109_0.conda}"
-MKL_ROOT="$DEPS_DIR/mkl-2023.1.0-linux"
-MKL_URL="${MKL_URL:-https://conda.anaconda.org/conda-forge/linux-64/mkl-2023.1.0-h84fe81f_48680.conda}"
-
+FAISS_SHA256="${FAISS_SHA256:-AA98AC39455E19DCB03A25A2164E1358A33041736E982683D468FB28F46D9FF0}"
 LLAMA_CPP_TAG="${LLAMA_CPP_TAG:-b9360}"
 LLAMA_CPP_ROOT="${LLAMA_CPP_ROOT:-$DEPS_DIR/llama.cpp}"
 LLAMA_CPP_BUILD="${LLAMA_CPP_BUILD:-$LLAMA_CPP_ROOT/build}"
@@ -102,6 +100,7 @@ ensure_tgz() {
 ensure_conda() {
     local url="$1"
     local path="$2"
+    local expected_sha256="${3:-}"
     if [[ -s "$path" ]] && ! "$PYTHON_BIN" - "$path" <<'PY'
 import sys
 import zipfile
@@ -111,39 +110,19 @@ PY
         rm -f "$path"
     fi
     download_file "$url" "$path"
+    if [[ -n "$expected_sha256" ]]; then
+        actual_sha256="$(sha256sum "$path" | awk '{print toupper($1)}')"
+        [[ "$actual_sha256" == "${expected_sha256^^}" ]] || {
+            rm -f "$path"
+            fail "SHA-256 verification failed for $url"
+        }
+    fi
 }
 
 extract_conda() {
     local archive="$1"
     local output="$2"
-    "$PYTHON_BIN" - "$archive" "$output" <<'PY'
-import pathlib
-import shutil
-import sys
-import tarfile
-import zipfile
-import zstandard
-
-archive = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
-work = archive.with_suffix(".extract")
-if work.exists():
-    shutil.rmtree(work)
-if output.exists():
-    shutil.rmtree(output)
-work.mkdir(parents=True)
-output.mkdir(parents=True)
-with zipfile.ZipFile(archive) as package:
-        package.extractall(work)
-payload = next(work.glob("pkg-*.tar.zst"))
-tar_path = work / "payload.tar"
-with payload.open("rb") as compressed, tar_path.open("wb") as decompressed:
-    reader = zstandard.ZstdDecompressor().stream_reader(compressed)
-    shutil.copyfileobj(reader, decompressed)
-with tarfile.open(tar_path) as package:
-    package.extractall(output)
-shutil.rmtree(work)
-PY
+    "$PYTHON_BIN" "$REPO_ROOT/.github/scripts/extract-conda-package.py" "$archive" "$output"
 }
 
 has_cuda_llama_binary() {

@@ -7,6 +7,7 @@ required_files=(
     "vcpkg.json"
     "rust-toolchain.toml"
     ".github/scripts/ensure-disk-space.sh"
+    ".github/scripts/extract-conda-package.py"
     "triplets/ci/x64-linux-release.cmake"
     "third_party/hf_tokenizers_capi/Cargo.toml"
     "third_party/hf_tokenizers_capi/Cargo.lock"
@@ -24,6 +25,11 @@ done
 if (( ${#missing[@]} > 0 )); then
     printf 'Required build inputs are missing from this checkout:\n' >&2
     printf '  - %s\n' "${missing[@]}" >&2
+    exit 1
+fi
+
+if ! grep -q 'filter="data"' "$repo_root/.github/scripts/extract-conda-package.py"; then
+    printf '.github/scripts/extract-conda-package.py must use safe tar extraction\n' >&2
     exit 1
 fi
 

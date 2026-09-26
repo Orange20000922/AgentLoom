@@ -112,7 +112,11 @@ TEST(L0BatchMetadataStoreTest, RedisV2BatchesRemainIsolatedAcrossSessions) {
             .port = "5000",
             .pool_size = 2,
         });
-    ASSERT_TRUE(redis->Start().ok()) << "local Redis is required for this isolation test";
+    const auto redis_status = redis->Start();
+    if (!redis_status.ok()) {
+        // Start() 内部执行 Redis PING；服务未启动时跳过外部依赖测试。
+        GTEST_SKIP() << "Redis PING failed: " << redis_status.message();
+    }
 
     const std::string tenant = "l0-v2-test-tenant";
     const std::string user = "l0-v2-test-user";

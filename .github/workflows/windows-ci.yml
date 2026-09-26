@@ -1,0 +1,407 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  windows-tests:
+    name: Windows Release Tests
+    runs-on: windows-2022
+    env:
+      CACHE_PLATFORM: windows-2022
+      BUILD_DIR: build/gha-windows-tests
+      VCPKG_TRIPLET: x64-windows-release
+      VCPKG_INSTALL_ROOT: vcpkg_installed
+      VCPKG_BINARY_CACHE: build/vcpkg-binary-cache-windows
+      VCPKG_MAX_CONCURRENCY: 4
+      # Windows hosted runner has more resources; allow more parallelism
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+      SCCACHE_DIR: ${{ github.workspace }}/build/sccache
+      SCCACHE_CACHE_VERSION: v1
+      DEPS_CACHE_VERSION: v2
+      ONNXRUNTIME_VERSION: 1.17.1
+      ONNXRUNTIME_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-x64-1.17.1.zip
+      ONNXRUNTIME_ARCHIVE: deps/onnxruntime-win-x64-1.17.1.zip
+      ONNXRUNTIME_ROOT: deps/onnxruntime-win-x64-1.17.1
+      SQLITE_VERSION: 3530100
+      SQLITE_URL: https://www.sqlite.org/2026/sqlite-amalgamation-3530100.zip
+      SQLITE_DLL_URL: https://www.sqlite.org/2026/sqlite-dll-win-x64-3530100.zip
+      BOOST_VERSION: 1_85_0
+      BOOST_URL: https://archives.boost.io/release/1.85.0/source/boost_1_85_0.zip
+      EIGEN_VERSION: 5.0.1
+      EIGEN_URL: https://gitlab.com/libeigen/eigen/-/archive/5.0.1/eigen-5.0.1.zip
+      FAISS_URL: https://conda.anaconda.org/pytorch/win-64/libfaiss-1.14.1-py3.12_h2e52968_0_cpu.conda
+      FAISS_SHA256: D42FF92B45F8D202C8FA205815690D876C26AF22295546E31F8253EB77C369FA
+      FAISS_ARCHIVE: deps/libfaiss-1.14.1-py3.12_h2e52968_0_cpu.conda
+      FAISS_ROOT: deps/faiss-1.14.1-cpu-win64
+      MKL_URL: https://repo.anaconda.com/pkgs/main/win-64/mkl-2023.1.0-h6b88ed4_46358.conda
+      MKL_SHA256: 2B06DA1AE1ED81D9A798395604C7653365E2B197A078FDE6FD47DC6218B730BB
+      MKL_ARCHIVE: deps/mkl-2023.1.0-h6b88ed4_46358.conda
+      MKL_ROOT: deps/mkl-2023.1.0-win64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate versioned build inputs
+        shell: pwsh
+        run: .\.github\scripts\validate-build-inputs.ps1
+
+      - name: Ensure build disk space
+        shell: pwsh
+        run: .\.github\scripts\ensure-disk-space.ps1 -MinFreeGiB 30
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: .github/workflows/windows-ci.yml
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Python tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "zstandard>=0.22,<1"
+
+      - name: Report runner resources
+        shell: pwsh
+        run: |
+          Write-Host "Logical CPUs: $([Environment]::ProcessorCount)"
+          Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory
+          Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -eq 'C' }
+
+      - name: Install sccache
+        shell: pwsh
+        run: |
+          $sccacheVersion = "v0.8.2"
+          $sccacheUrl = "https://github.com/mozilla/sccache/releases/download/$sccacheVersion/sccache-$sccacheVersion-x86_64-pc-windows-msvc.zip"
+          $sccacheZip = "$env:TEMP\sccache.zip"
+          Invoke-WebRequest -Uri $sccacheUrl -OutFile $sccacheZip
+          Expand-Archive -Path $sccacheZip -DestinationPath "$env:TEMP\sccache-extract" -Force
+          $sccacheExe = Get-ChildItem -Path "$env:TEMP\sccache-extract" -Recurse -Filter "sccache.exe" | Select-Object -First 1
+          New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE\build\tools" -Force | Out-Null
+          Copy-Item $sccacheExe.FullName -Destination "$env:GITHUB_WORKSPACE\build\tools\sccache.exe"
+          Write-Host "sccache installed to: $env:GITHUB_WORKSPACE\build\tools\sccache.exe"
+          & "$env:GITHUB_WORKSPACE\build\tools\sccache.exe" --version
+
+      - name: Restore vcpkg binary cache
+        id: restore-vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/vcpkg-binary-cache-windows
+          key: ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-features-tests-${{ hashFiles('vcpkg.json', 'triplets/ci/x64-windows-release.cmake') }}
+          restore-keys: |
+            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-features-tests-
+            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-
+
+      - name: Restore binary dependency archives
+        id: restore-dependency-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            deps/*.zip
+            deps/*.conda
+          key: ${{ env.CACHE_PLATFORM }}-ci-deps-${{ env.DEPS_CACHE_VERSION }}
+          restore-keys: |
+            ${{ env.CACHE_PLATFORM }}-ci-deps-
+
+      - name: Restore compiler outputs
+        id: restore-compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-sccache-${{ env.SCCACHE_CACHE_VERSION }}-${{ github.sha }}
+          restore-keys: |
+            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-sccache-${{ env.SCCACHE_CACHE_VERSION }}-
+
+      - name: Cache Rust dependencies and tokenizer outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hf-tokenizers-windows-v1
+          workspaces: third_party/hf_tokenizers_capi -> target
+
+      - name: Verify tokenizer FFI
+        working-directory: third_party/hf_tokenizers_capi
+        shell: pwsh
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked --release
+          # Windows C++ FFI smoke test
+          cl.exe /std:c++20 /EHsc /Iinclude tests/ffi_smoke.cpp target/release/hf_tokenizers_capi.lib userenv.lib ws2_32.lib bcrypt.lib advapi32.lib /Fe:target/ffi_smoke.exe
+          .\target\ffi_smoke.exe
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgBaseline = (Get-Content vcpkg.json -Raw -Encoding UTF8 | ConvertFrom-Json).'builtin-baseline'
+          git init vcpkg
+          git -C vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C vcpkg fetch --no-tags origin $vcpkgBaseline
+          git -C vcpkg checkout --detach FETCH_HEAD
+          $isShallow = git -C vcpkg rev-parse --is-shallow-repository
+          if ($isShallow -eq "true") {
+            Write-Error "vcpkg clone is shallow; versioning will fail"
+            exit 1
+          }
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          .\vcpkg\vcpkg.exe install `
+            --triplet $env:VCPKG_TRIPLET `
+            --host-triplet $env:VCPKG_TRIPLET `
+            --x-feature=tests `
+            --x-manifest-root="$env:GITHUB_WORKSPACE" `
+            --x-install-root="$env:GITHUB_WORKSPACE\$env:VCPKG_INSTALL_ROOT" `
+            --overlay-triplets="$env:GITHUB_WORKSPACE\triplets\ci" `
+            "--binarysource=clear;files,$env:GITHUB_WORKSPACE\$env:VCPKG_BINARY_CACHE,readwrite" `
+            --clean-after-build
+
+      - name: Save vcpkg binary cache
+        if: steps.restore-vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/vcpkg-binary-cache-windows
+          key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Prepare Windows binary dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "deps" -Force | Out-Null
+
+          function Download-File {
+            param([string]$Url, [string]$Path, [string]$Sha256 = "")
+            if (Test-Path $Path) {
+              if (-not $Sha256 -or (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Sha256) {
+                Write-Host "Using cached: $Path"
+                return
+              }
+              Remove-Item -LiteralPath $Path -Force
+            }
+            Write-Host "Downloading: $Url"
+            $tempPath = "$Path.tmp"
+            Remove-Item -LiteralPath $tempPath -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $Url -OutFile $tempPath -MaximumRetryCount 5 -RetryIntervalSec 5
+            if ($Sha256 -and (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash -ne $Sha256) {
+              Remove-Item -LiteralPath $tempPath -Force
+              throw "SHA-256 verification failed for $Url"
+            }
+            Move-Item -LiteralPath $tempPath -Destination $Path -Force
+          }
+
+          function Ensure-Zip {
+            param([string]$Url, [string]$Path)
+            if ((Test-Path $Path)) {
+              try {
+                Add-Type -AssemblyName System.IO.Compression.FileSystem
+                $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+                $archive.Dispose()
+              } catch {
+                Remove-Item -Path $Path -Force
+              }
+            }
+            Download-File -Url $Url -Path $Path
+          }
+
+          # ONNX Runtime
+          if (-not (Test-Path "$env:ONNXRUNTIME_ROOT")) {
+            Ensure-Zip -Url $env:ONNXRUNTIME_URL -Path $env:ONNXRUNTIME_ARCHIVE
+            Expand-Archive -Path $env:ONNXRUNTIME_ARCHIVE -DestinationPath "deps" -Force
+          }
+
+          # SQLite
+          if (-not (Test-Path "deps/sqlite-amalgamation-$env:SQLITE_VERSION")) {
+            Ensure-Zip -Url $env:SQLITE_URL -Path "deps/sqlite-amalgamation-$env:SQLITE_VERSION.zip"
+            Expand-Archive -Path "deps/sqlite-amalgamation-$env:SQLITE_VERSION.zip" -DestinationPath "deps" -Force
+          }
+          if (-not (Test-Path "deps/sqlite3.dll") -or -not (Test-Path "deps/sqlite3.def")) {
+            Ensure-Zip -Url $env:SQLITE_DLL_URL -Path "deps/sqlite-dll-win-x64-$env:SQLITE_VERSION.zip"
+            Expand-Archive -Path "deps/sqlite-dll-win-x64-$env:SQLITE_VERSION.zip" -DestinationPath "deps" -Force
+          }
+
+          # Eigen
+          if (-not (Test-Path "deps/eigen-$env:EIGEN_VERSION")) {
+            Ensure-Zip -Url $env:EIGEN_URL -Path "deps/eigen-$env:EIGEN_VERSION.zip"
+            Expand-Archive -Path "deps/eigen-$env:EIGEN_VERSION.zip" -DestinationPath "deps" -Force
+          }
+
+          # Boost (headers only for now)
+          if (-not (Test-Path "deps/boost_$env:BOOST_VERSION")) {
+            Ensure-Zip -Url $env:BOOST_URL -Path "deps/boost_$env:BOOST_VERSION.zip"
+            Expand-Archive -Path "deps/boost_$env:BOOST_VERSION.zip" -DestinationPath "deps" -Force
+          }
+
+          # Faiss and MKL use the same Conda payload extraction model as Linux CI.
+          if (-not (Test-Path "$env:FAISS_ROOT/include/faiss/IndexFlat.h") -or
+              -not (Test-Path "$env:FAISS_ROOT/lib/faiss.lib") -or
+              -not (Test-Path "$env:FAISS_ROOT/bin/faiss.dll")) {
+            Download-File -Url $env:FAISS_URL -Path $env:FAISS_ARCHIVE -Sha256 $env:FAISS_SHA256
+            python .github/scripts/extract-conda-package.py $env:FAISS_ARCHIVE $env:FAISS_ROOT
+          }
+          if (-not (Test-Path "$env:MKL_ROOT/Library/bin/mkl_rt.2.dll")) {
+            Download-File -Url $env:MKL_URL -Path $env:MKL_ARCHIVE -Sha256 $env:MKL_SHA256
+            python .github/scripts/extract-conda-package.py $env:MKL_ARCHIVE $env:MKL_ROOT
+          }
+
+      - name: Verify Windows native dependencies
+        shell: pwsh
+        run: |
+          $required = @(
+            "$env:ONNXRUNTIME_ROOT/include/onnxruntime_c_api.h",
+            "$env:ONNXRUNTIME_ROOT/lib/onnxruntime.dll",
+            "deps/sqlite-amalgamation-$env:SQLITE_VERSION/sqlite3.h",
+            "deps/sqlite3.dll",
+            "deps/sqlite3.def",
+            "deps/boost_$env:BOOST_VERSION/boost/redis.hpp",
+            "deps/eigen-$env:EIGEN_VERSION/Eigen/Core",
+            "$env:FAISS_ROOT/include/faiss/IndexFlat.h",
+            "$env:FAISS_ROOT/lib/faiss.lib",
+            "$env:FAISS_ROOT/bin/faiss.dll",
+            "$env:FAISS_ROOT/share/faiss/faiss-config.cmake",
+            "$env:MKL_ROOT/Library/bin/mkl_rt.2.dll"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path $_) })
+          if ($missing.Count -gt 0) {
+            $missing | ForEach-Object { Write-Error "Missing dependency input: $_" }
+            exit 1
+          }
+
+      - name: Save binary dependency archives
+        if: steps.restore-dependency-archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/*.zip
+            deps/*.conda
+          key: ${{ steps.restore-dependency-archives.outputs.cache-primary-key }}
+
+      - name: Configure tests
+        shell: pwsh
+        run: |
+          # Ensure VS 2022 (or 2026 if available) is in PATH
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -property installationPath
+          Write-Host "Visual Studio path: $vsPath"
+
+          # Set up sccache
+          New-Item -ItemType Directory -Path $env:SCCACHE_DIR -Force | Out-Null
+          $env:PATH = "$env:GITHUB_WORKSPACE\build\tools;$env:PATH"
+          sccache --version
+          sccache --zero-stats
+
+          # Use the newer CMake that supports VS 2026 if available
+          $cmakePath = "C:\Program Files\CMake\bin\cmake.exe"
+          if (Test-Path $cmakePath) {
+            $env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
+            Write-Host "Using CMake from: C:\Program Files\CMake\bin\"
+          }
+
+          cmake --version
+
+          # Detect available generator
+          $generator = "Visual Studio 17 2022"
+          $generatorTest = cmake --help 2>&1 | Select-String "Visual Studio 18 2026"
+          if ($generatorTest) {
+            $generator = "Visual Studio 18 2026"
+            Write-Host "Using VS 2026 generator"
+          } else {
+            Write-Host "Using VS 2022 generator"
+          }
+          "AGENTLOOM_GENERATOR=$generator" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          cmake -S . -B $env:BUILD_DIR `
+            -G "$generator" -A x64 `
+            -DCMAKE_CONFIGURATION_TYPES=Release `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            -DBERT_BUILD_TESTS=ON `
+            -DBERT_BUILD_MULTIMODAL_INFERENCE_SERVER=OFF `
+            -DBERT_VCPKG_TRIPLET="$env:VCPKG_TRIPLET" `
+            -DBERT_USE_ONNXRUNTIME_GPU=OFF `
+            -DONNXRUNTIME_CPU_ROOT="$env:GITHUB_WORKSPACE\$env:ONNXRUNTIME_ROOT" `
+            -DBERT_SQLITE_INCLUDE_DIR="$env:GITHUB_WORKSPACE\deps\sqlite-amalgamation-$env:SQLITE_VERSION" `
+            -DBERT_SQLITE_DLL="$env:GITHUB_WORKSPACE\deps\sqlite3.dll" `
+            -DBERT_SQLITE_DEF="$env:GITHUB_WORKSPACE\deps\sqlite3.def" `
+            -DBERT_BOOST_ROOT="$env:GITHUB_WORKSPACE\deps\boost_$env:BOOST_VERSION" `
+            -DBERT_EIGEN_ROOT="$env:GITHUB_WORKSPACE\deps\eigen-$env:EIGEN_VERSION" `
+            -DBERT_FAISS_ROOT="$env:GITHUB_WORKSPACE\$env:FAISS_ROOT" `
+            -DBERT_MKL_RUNTIME_ROOT="$env:GITHUB_WORKSPACE\$env:MKL_ROOT" `
+            -DAGENTLOOM_BUILD_LOCAL_LLM=OFF `
+            -DAGENTLOOM_BUILD_MEDIA=OFF
+
+      - name: Build SDK and test targets
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\build\tools;$env:PATH"
+
+          cmake --build $env:BUILD_DIR --config Release --target `
+            agentloom_sdk `
+            core_tests `
+            net_tests `
+            http_client_tests `
+            tls_tests `
+            storage_tests `
+            semantic_cache_tests `
+            document_tests `
+            config_tests `
+            persona_runtime_tests `
+            gateway_service_tests `
+            async_grpc_runtime_tests `
+            --parallel
+
+          sccache --show-stats
+
+      - name: Save compiler outputs
+        if: always() && steps.restore-compiler-cache.outcome == 'success' && steps.restore-compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ steps.restore-compiler-cache.outputs.cache-primary-key }}
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          ctest --test-dir $env:BUILD_DIR -C Release `
+            -L ci -E "(ReloadBatchCycle|RedisV2Batches)" `
+            --output-on-failure
+
+      - name: Verify installed package consumer
+        shell: pwsh
+        run: |
+          cmake `
+            -DAGENTLOOM_SOURCE_DIR="$env:GITHUB_WORKSPACE" `
+            -DAGENTLOOM_PACKAGE_BUILD_DIR="$env:GITHUB_WORKSPACE\$env:BUILD_DIR" `
+            -DAGENTLOOM_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\build\gha-windows-tests-install" `
+            -DAGENTLOOM_CONSUMER_BUILD_DIR="$env:GITHUB_WORKSPACE\build\gha-windows-tests-consumer" `
+            -DAGENTLOOM_CONSUMER_GENERATOR="$env:AGENTLOOM_GENERATOR" `
+            -DAGENTLOOM_CONSUMER_BUILD_TYPE=Release `
+            -DAGENTLOOM_CONSUMER_TOOLCHAIN_FILE="$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DAGENTLOOM_CONSUMER_TRIPLET="$env:VCPKG_TRIPLET" `
+            -DAGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR="$env:GITHUB_WORKSPACE\$env:VCPKG_INSTALL_ROOT" `
+            -DAGENTLOOM_CONSUMER_BOOST_ROOT="$env:GITHUB_WORKSPACE\deps\boost_$env:BOOST_VERSION" `
+            -P cmake/AgentLoomPackageConsumerTest.cmake
