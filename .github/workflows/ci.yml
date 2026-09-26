@@ -44,14 +44,9 @@ jobs:
       ONNXRUNTIME_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz
       ONNXRUNTIME_ARCHIVE: deps/onnxruntime-linux-x64-1.17.1.tgz
       ONNXRUNTIME_ROOT: deps/onnxruntime-linux-x64-1.17.1
-      LLAMA_CPP_TAG: b9360
-      LLAMA_CPP_SOURCE_ARCHIVE: deps/llama.cpp-b9360.tar.gz
-      LLAMA_CPP_BINARY_ARCHIVE: deps/llama-b9360-bin-ubuntu-x64.tar.gz
-      LLAMA_CPP_ROOT: deps/llama.cpp
-      LLAMA_CPP_BUILD: deps/llama.cpp/build
       SQLITE_AMALGAMATION_URL: https://www.sqlite.org/2026/sqlite-amalgamation-3530100.zip
       FAISS_CONDA_URL: https://conda.anaconda.org/conda-forge/linux-64/libfaiss-1.10.0-cpu_openblas_hfcc2109_0.conda
-      MKL_CONDA_URL: https://conda.anaconda.org/conda-forge/linux-64/mkl-2023.1.0-h84fe81f_48680.conda
+      FAISS_CONDA_SHA256: AA98AC39455E19DCB03A25A2164E1358A33041736E982683D468FB28F46D9FF0
 
     steps:
       - name: Checkout
@@ -102,8 +97,7 @@ jobs:
             tar \
             unzip \
             zip \
-            libopenblas-dev \
-            libopencv-dev
+            libopenblas-dev
 
       - name: Restore vcpkg binary cache
         id: restore-vcpkg-cache
@@ -241,6 +235,7 @@ jobs:
           ensure_conda() {
             local url="$1"
             local path="$2"
+            local expected_sha256="$3"
             if [[ -s "$path" ]] && ! python - "$path" <<'PY'
           import sys, zipfile
           raise SystemExit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)
@@ -249,20 +244,13 @@ jobs:
               rm -f "$path"
             fi
             download_file "$url" "$path"
-          }
-          copy_required_shared_library() {
-            local pattern="$1"
-            local destination="$2"
-            local source
-            source="$(find deps/llama-bin -type f -name "$pattern" -print -quit)"
-            if [[ -z "$source" ]]; then
-              echo "Required llama.cpp shared library matching $pattern was not found" >&2
-              find deps/llama-bin -maxdepth 4 -type f -print >&2
+            actual_sha256="$(sha256sum "$path" | awk '{print toupper($1)}')"
+            if [[ "$actual_sha256" != "${expected_sha256^^}" ]]; then
+              rm -f "$path"
+              echo "SHA-256 verification failed for $url" >&2
               return 1
             fi
-            cp "$source" "$destination"
           }
-
           if [[ ! -d deps/sqlite-amalgamation-3530100 ]]; then
             ensure_zip "$SQLITE_AMALGAMATION_URL" deps/sqlite-amalgamation-3530100.zip
             unzip -q deps/sqlite-amalgamation-3530100.zip -d deps
@@ -278,92 +266,20 @@ jobs:
             tar -xzf deps/boost_1_85_0.tar.gz -C deps
           fi
 
-          if [[ ! -d "$LLAMA_CPP_ROOT" ]]; then
-            ensure_tgz "https://github.com/ggml-org/llama.cpp/archive/refs/tags/$LLAMA_CPP_TAG.tar.gz" "$LLAMA_CPP_SOURCE_ARCHIVE"
-            mkdir -p deps/llama-source
-            tar -xzf "$LLAMA_CPP_SOURCE_ARCHIVE" -C deps/llama-source --strip-components=1
-            mv deps/llama-source "$LLAMA_CPP_ROOT"
-          fi
-
-          if [[ ! -f "$LLAMA_CPP_BUILD/src/libllama.so" ]]; then
-            ensure_tgz "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_CPP_TAG/llama-$LLAMA_CPP_TAG-bin-ubuntu-x64.tar.gz" "$LLAMA_CPP_BINARY_ARCHIVE"
-            rm -rf deps/llama-bin
-            mkdir -p deps/llama-bin
-            tar -xzf "$LLAMA_CPP_BINARY_ARCHIVE" -C deps/llama-bin
-            mkdir -p \
-              "$LLAMA_CPP_BUILD/src" \
-              "$LLAMA_CPP_BUILD/common" \
-              "$LLAMA_CPP_BUILD/tools/mtmd" \
-              "$LLAMA_CPP_BUILD/ggml/src" \
-              "$LLAMA_CPP_BUILD/bin"
-            copy_required_shared_library 'libllama.so*' "$LLAMA_CPP_BUILD/src/libllama.so"
-            copy_required_shared_library 'libmtmd.so*' "$LLAMA_CPP_BUILD/tools/mtmd/libmtmd.so"
-            copy_required_shared_library 'libggml.so*' "$LLAMA_CPP_BUILD/ggml/src/libggml.so"
-            copy_required_shared_library 'libggml-base.so*' "$LLAMA_CPP_BUILD/ggml/src/libggml-base.so"
-            while IFS= read -r -d '' library; do
-              cp -a "$library" "$LLAMA_CPP_BUILD/bin/"
-            done < <(find deps/llama-bin \( -type f -o -type l \) -name '*.so*' -print0)
-            ar rcs "$LLAMA_CPP_BUILD/common/libllama-common.a"
-          fi
-
-          if [[ ! -f deps/faiss-1.14.1-cpu-linux/include/faiss/IndexFlat.h ||
-                ! -f deps/faiss-1.14.1-cpu-linux/lib/libfaiss.so ]]; then
-            rm -rf deps/faiss-1.14.1-cpu-linux
-            ensure_conda "$FAISS_CONDA_URL" deps/libfaiss-linux.conda
-            python - <<'PY'
-          import pathlib, shutil, tarfile, zipfile
-          import zstandard
-          archive = pathlib.Path("deps/libfaiss-linux.conda")
-          work = pathlib.Path("deps/faiss-conda-extract")
-          out = pathlib.Path("deps/faiss-1.14.1-cpu-linux")
-          if work.exists():
-              shutil.rmtree(work)
-          work.mkdir(parents=True)
-          with zipfile.ZipFile(archive) as zf:
-              zf.extractall(work)
-          pkg = next(work.glob("pkg-*.tar.zst"))
-          tar_path = work / "pkg.tar"
-          with pkg.open("rb") as source, tar_path.open("wb") as destination:
-              zstandard.ZstdDecompressor().copy_stream(source, destination)
-          with tarfile.open(tar_path) as tf:
-              tf.extractall(out, filter="data")
-          PY
-            if [[ ! -f deps/faiss-1.14.1-cpu-linux/lib/libfaiss.so ]]; then
-              found="$(find deps/faiss-1.14.1-cpu-linux -name 'libfaiss.so*' -type f | head -n 1)"
+          if [[ ! -f deps/faiss-1.10.0-cpu-linux/include/faiss/IndexFlat.h ||
+                ! -f deps/faiss-1.10.0-cpu-linux/lib/libfaiss.so ]]; then
+            rm -rf deps/faiss-1.10.0-cpu-linux
+            ensure_conda "$FAISS_CONDA_URL" deps/libfaiss-linux.conda "$FAISS_CONDA_SHA256"
+            python .github/scripts/extract-conda-package.py \
+              deps/libfaiss-linux.conda deps/faiss-1.10.0-cpu-linux
+            if [[ ! -f deps/faiss-1.10.0-cpu-linux/lib/libfaiss.so ]]; then
+              found="$(find deps/faiss-1.10.0-cpu-linux -name 'libfaiss.so*' -type f | head -n 1)"
               test -n "$found"
-              mkdir -p deps/faiss-1.14.1-cpu-linux/lib
-              cp "$found" deps/faiss-1.14.1-cpu-linux/lib/libfaiss.so
+              mkdir -p deps/faiss-1.10.0-cpu-linux/lib
+              cp "$found" deps/faiss-1.10.0-cpu-linux/lib/libfaiss.so
             fi
-            test -f deps/faiss-1.14.1-cpu-linux/include/faiss/IndexFlat.h
-            test -f deps/faiss-1.14.1-cpu-linux/lib/libfaiss.so
-          fi
-
-          if [[ ! -d deps/mkl-2023.1.0-linux ]]; then
-            ensure_conda "$MKL_CONDA_URL" deps/mkl-linux.conda
-            python - <<'PY'
-          import pathlib, shutil, tarfile, zipfile
-          import zstandard
-          archive = pathlib.Path("deps/mkl-linux.conda")
-          work = pathlib.Path("deps/mkl-conda-extract")
-          out = pathlib.Path("deps/mkl-2023.1.0-linux")
-          if work.exists():
-              shutil.rmtree(work)
-          work.mkdir(parents=True)
-          with zipfile.ZipFile(archive) as zf:
-              zf.extractall(work)
-          pkg = next(work.glob("pkg-*.tar.zst"))
-          tar_path = work / "pkg.tar"
-          with pkg.open("rb") as source, tar_path.open("wb") as destination:
-              zstandard.ZstdDecompressor().copy_stream(source, destination)
-          with tarfile.open(tar_path) as tf:
-              tf.extractall(out, filter="data")
-          PY
-            if [[ ! -f deps/mkl-2023.1.0-linux/lib/libmkl_rt.so ]]; then
-              found="$(find deps/mkl-2023.1.0-linux -name 'libmkl_rt.so*' -type f | head -n 1)"
-              test -n "$found"
-              mkdir -p deps/mkl-2023.1.0-linux/lib
-              cp "$found" deps/mkl-2023.1.0-linux/lib/libmkl_rt.so
-            fi
+            test -f deps/faiss-1.10.0-cpu-linux/include/faiss/IndexFlat.h
+            test -f deps/faiss-1.10.0-cpu-linux/lib/libfaiss.so
           fi
 
       - name: Save binary dependency archives
@@ -387,8 +303,8 @@ jobs:
             ldconfig -p | grep -i blas >&2 || true
             exit 1
           fi
-          test -f deps/faiss-1.14.1-cpu-linux/include/faiss/IndexFlat.h
-          test -f deps/faiss-1.14.1-cpu-linux/lib/libfaiss.so
+          test -f deps/faiss-1.10.0-cpu-linux/include/faiss/IndexFlat.h
+          test -f deps/faiss-1.10.0-cpu-linux/lib/libfaiss.so
           echo "BERT_OPENBLAS_LIBRARY=$openblas_path" >> "$GITHUB_ENV"
           echo "Using OpenBLAS: $openblas_path"
 
@@ -411,10 +327,7 @@ jobs:
             -DBERT_OPENBLAS_LIBRARY="$BERT_OPENBLAS_LIBRARY" \
             -DONNXRUNTIME_CPU_ROOT="$GITHUB_WORKSPACE/$ONNXRUNTIME_ROOT" \
             -DAGENTLOOM_BUILD_LOCAL_LLM=OFF \
-            -DAGENTLOOM_BUILD_MEDIA=OFF \
-            -DLLAMA_CPP_ROOT="$GITHUB_WORKSPACE/$LLAMA_CPP_ROOT" \
-            -DLLAMA_CPP_BUILD="$GITHUB_WORKSPACE/$LLAMA_CPP_BUILD" \
-            -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4
+            -DAGENTLOOM_BUILD_MEDIA=OFF
 
       - name: Build SDK and test targets
         shell: bash

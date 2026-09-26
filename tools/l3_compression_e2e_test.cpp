@@ -335,8 +335,9 @@ int main(int argc, char** argv) {
 
     // Step 2: Run L3 compression
     std::cout << "[e2e] Running L3 compression (LLM + Embedding)...\n";
+    agent::memory::MemoryOwner owner{"default-tenant", test_user};
     auto start = std::chrono::steady_clock::now();
-    auto compress_result = compressor->CompressDailyMemory(test_user, test_date);
+    auto compress_result = compressor->CompressDailyMemory(owner, test_date);
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
 
@@ -355,7 +356,7 @@ int main(int argc, char** argv) {
 
     // Step 3: Retrieve L3 summary
     std::cout << "[e2e] Retrieving L3 summary...\n";
-    auto summary_result = compressor->GetDailySummary(test_user, test_date);
+    auto summary_result = compressor->GetDailySummary(owner, test_date);
     if (!summary_result.ok()) {
         return Fail("GetDailySummary: " + summary_result.status().message());
     }
@@ -383,7 +384,7 @@ int main(int argc, char** argv) {
 
     // Step 4: Test GetUserSummaries
     std::cout << "\n[e2e] Testing GetUserSummaries...\n";
-    auto summaries_result = compressor->GetUserSummaries(test_user, 10);
+    auto summaries_result = compressor->GetUserSummaries(owner, 10);
     if (!summaries_result.ok()) {
         return Fail("GetUserSummaries: " + summaries_result.status().message());
     }
@@ -396,7 +397,7 @@ int main(int argc, char** argv) {
 
     // Step 5: Test semantic search
     std::cout << "\n[e2e] Testing semantic search...\n";
-    auto search_result = compressor->SearchFacts(test_user, "C++智能指针", 3);
+    auto search_result = compressor->SearchFacts(owner, "C++智能指针", 3);
     if (!search_result.ok()) {
         return Fail("SearchFacts: " + search_result.status().message());
     }

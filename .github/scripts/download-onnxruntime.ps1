@@ -1,36 +1,92 @@
+# Download and verify ONNX Runtime for Windows
+# Usage: .\download-onnxruntime.ps1 <url> <archive-path> <deps-dir> <extract-root>
+
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory=$true)]
     [string]$Url,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory=$true)]
     [string]$ArchivePath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$ExtractRoot,
+    [Parameter(Mandatory=$true)]
+    [string]$DepsDir,
 
-    [Parameter(Mandatory = $true)]
-    [string]$ExpectedRoot
+    [Parameter(Mandatory=$true)]
+    [string]$ExtractRoot
 )
 
 $ErrorActionPreference = "Stop"
 
-if (Test-Path -LiteralPath $ExpectedRoot) {
-    Write-Host "ONNX Runtime already present at $ExpectedRoot"
-    exit 0
+function Download-File {
+    param([string]$Url, [string]$Path)
+
+    if (Test-Path $Path) {
+        Write-Host "Archive already exists: $Path"
+        return
+    }
+
+    Write-Host "Downloading ONNX Runtime from: $Url"
+    $tempPath = "$Path.tmp"
+    Remove-Item -Path $tempPath -ErrorAction SilentlyContinue
+
+    Invoke-WebRequest -Uri $Url -OutFile $tempPath -MaximumRetryCount 5 -RetryIntervalSec 5
+
+    if (-not (Test-Path $tempPath)) {
+        throw "Download failed: $Url"
+    }
+
+    Move-Item -Path $tempPath -Destination $Path -Force
+    Write-Host "Downloaded to: $Path"
 }
 
-New-Item -ItemType Directory -Force -Path $ExtractRoot | Out-Null
+function Verify-Zip {
+    param([string]$Path)
 
-if (-not (Test-Path -LiteralPath $ArchivePath)) {
-    Write-Host "Downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $ArchivePath
-} else {
-    Write-Host "Using cached archive $ArchivePath"
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $zip.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
 }
 
-Write-Host "Extracting $ArchivePath to $ExtractRoot"
-Expand-Archive -Path $ArchivePath -DestinationPath $ExtractRoot -Force
+# Create deps directory
+New-Item -ItemType Directory -Path $DepsDir -Force | Out-Null
 
-if (-not (Test-Path -LiteralPath $ExpectedRoot)) {
-    throw "Expected extracted directory not found: $ExpectedRoot"
+# Download archive if needed
+if (-not (Test-Path $ArchivePath)) {
+    Download-File -Url $Url -Path $ArchivePath
 }
+
+# Verify archive integrity
+if (-not (Verify-Zip -Path $ArchivePath)) {
+    Write-Host "Archive is corrupted, re-downloading..."
+    Remove-Item -Path $ArchivePath -Force
+    Download-File -Url $Url -Path $ArchivePath
+
+    if (-not (Verify-Zip -Path $ArchivePath)) {
+        throw "Archive is still corrupted after re-download: $ArchivePath"
+    }
+}
+
+# Extract if not already extracted
+if (-not (Test-Path $ExtractRoot)) {
+    Write-Host "Extracting ONNX Runtime to: $ExtractRoot"
+    Expand-Archive -Path $ArchivePath -DestinationPath $DepsDir -Force
+}
+
+# Verify extraction
+$requiredFiles = @(
+    "$ExtractRoot\include\onnxruntime\onnxruntime_c_api.h",
+    "$ExtractRoot\lib\onnxruntime.lib"
+)
+
+foreach ($file in $requiredFiles) {
+    if (-not (Test-Path $file)) {
+        throw "Required file not found after extraction: $file"
+    }
+}
+
+Write-Host "ONNX Runtime is ready at: $ExtractRoot"

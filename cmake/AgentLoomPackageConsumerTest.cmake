@@ -24,6 +24,12 @@ function(_agentloom_run step)
     endif()
 endfunction()
 
+# A package verification must not inherit files or CMake cache entries from a
+# previous install/consumer run.
+file(REMOVE_RECURSE
+    "${AGENTLOOM_INSTALL_PREFIX}"
+    "${AGENTLOOM_CONSUMER_BUILD_DIR}")
+
 _agentloom_run("AgentLoom SDK build"
     "${CMAKE_COMMAND}" --build "${AGENTLOOM_PACKAGE_BUILD_DIR}"
     --config "${AGENTLOOM_PACKAGE_CONFIG}" --target agentloom_sdk --parallel)
@@ -53,6 +59,24 @@ foreach(_package_file IN LISTS _package_cmake_files)
     endforeach()
 endforeach()
 
+set(_consumer_effective_triplet "${AGENTLOOM_CONSUMER_TRIPLET}")
+if(DEFINED AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR AND
+        NOT AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR STREQUAL "" AND
+        DEFINED AGENTLOOM_CONSUMER_TRIPLET AND
+        NOT AGENTLOOM_CONSUMER_TRIPLET STREQUAL "")
+    set(_requested_triplet_dir
+        "${AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR}/${AGENTLOOM_CONSUMER_TRIPLET}")
+    if(NOT IS_DIRECTORY "${_requested_triplet_dir}" AND
+            AGENTLOOM_CONSUMER_TRIPLET MATCHES "-release$")
+        string(REGEX REPLACE "-release$" "" _vcpkg_base_triplet
+            "${AGENTLOOM_CONSUMER_TRIPLET}")
+        if(IS_DIRECTORY
+                "${AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR}/${_vcpkg_base_triplet}")
+            set(_consumer_effective_triplet "${_vcpkg_base_triplet}")
+        endif()
+    endif()
+endif()
+
 set(_consumer_configure_command
     "${CMAKE_COMMAND}"
     -S "${AGENTLOOM_SOURCE_DIR}/tests/package/consumer"
@@ -68,9 +92,9 @@ if(DEFINED AGENTLOOM_CONSUMER_TOOLCHAIN_FILE AND NOT AGENTLOOM_CONSUMER_TOOLCHAI
     list(APPEND _consumer_configure_command
         "-DCMAKE_TOOLCHAIN_FILE=${AGENTLOOM_CONSUMER_TOOLCHAIN_FILE}")
 endif()
-if(DEFINED AGENTLOOM_CONSUMER_TRIPLET AND NOT AGENTLOOM_CONSUMER_TRIPLET STREQUAL "")
+if(DEFINED _consumer_effective_triplet AND NOT _consumer_effective_triplet STREQUAL "")
     list(APPEND _consumer_configure_command
-        "-DVCPKG_TARGET_TRIPLET=${AGENTLOOM_CONSUMER_TRIPLET}")
+        "-DVCPKG_TARGET_TRIPLET=${_consumer_effective_triplet}")
 endif()
 if(DEFINED AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR AND
         NOT AGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR STREQUAL "")

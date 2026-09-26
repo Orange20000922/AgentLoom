@@ -148,23 +148,44 @@ agentloom_link_whole_archive(my_agent my_config_sections)
 - 预编译/外部依赖：ONNX Runtime、llama.cpp（含 mtmd）、OpenCV、SQLite、Faiss、Eigen、MKL 和 HuggingFace Tokenizers C API
 - **工具链说明**：Windows 本地构建必须保持 CMake generator、MSVC 工具集、CRT 配置和 vcpkg/预编译依赖 ABI 一致。若依赖由 v145 构建，宿主也必须使用 VS2026/v145；ABI guard 会拒绝已知的 Debug/Release CRT 冲突，正式构建可用 `AGENT_LLAMA_STRICT_TOOLSET_ABI=ON` 强制工具集一致。
 
-仓库的 `deps/` 与 `vcpkg_installed/` 是本地依赖目录，不随源码分发。Linux 脚本可以准备对应依赖；Windows 需要按本机路径准备依赖，并确保 CMake generator、MSVC 工具集和 vcpkg ABI 一致。
+仓库的 `deps/` 与 `vcpkg_installed/` 是本地依赖目录，不随源码分发。依赖准备脚本会下载并校验 Core/SDK 所需的 ONNX Runtime、SQLite、Boost、Eigen、Faiss、MKL 等输入；llama.cpp 和 GStreamer 是按需提供的外部 SDK。完整贡献者流程见 [`CONTRIBUTE.md`](CONTRIBUTE.md)。
 
 ### Windows
 
-VS2026/v145 必须使用支持 `Visual Studio 18 2026` generator 的 CMake。配置前先用 `cmake --version` 和 `cmake --help` 核对 PATH：
+VS2026/v145 必须使用支持 `Visual Studio 18 2026` generator 的 CMake。配置前先用 `cmake --version` 和 `cmake --help` 核对 PATH。推荐使用仓库脚本构建 Core/SDK Release：
 
 ```powershell
-cmake -B build/x64-Release `
-  -G "Visual Studio 18 2026" -A x64 `
-  -DCMAKE_CONFIGURATION_TYPES=Release `
-  -DBERT_VCPKG_TRIPLET=x64-windows `
-  -DBERT_USE_ONNXRUNTIME_GPU=OFF `
-  -DLLAMA_CPP_ROOT="<path-to-llama.cpp>" `
-  -DLLAMA_CPP_BUILD="<path-to-llama.cpp-build>"
+.\windows\scripts\prepare_deps.ps1
+.\windows\scripts\configure.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Tests `
+  -Generator "Visual Studio 18 2026" `
+  -Triplet x64-windows-release
 
-cmake --build build/x64-Release `
-  --config Release --parallel
+.\windows\scripts\build.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Config Release
+
+.\windows\scripts\test.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -Label ci `
+  -Exclude "ReloadBatchCycle|RedisV2Batches"
+```
+
+Windows CI 使用同一套 Core/SDK Release 开关：`AGENTLOOM_BUILD_LOCAL_LLM=OFF`、
+`AGENTLOOM_BUILD_MEDIA=OFF`。启用 Media、Local LLM 或完整多模态推理时，参见
+[`windows/README.md`](windows/README.md) 和 [`CONTRIBUTE.md`](CONTRIBUTE.md)。
+
+安装 SDK 并验证下游 consumer：
+
+```powershell
+cmake --install build\x64-Release-All-v145 `
+  --config Release --prefix build\agentloom-install
+.\windows\scripts\verify_package.ps1 `
+  -BuildDir build\x64-Release-All-v145 `
+  -InstallDir build\agentloom-install `
+  -ConsumerBuildDir build\windows-package-consumer `
+  -Generator "Visual Studio 18 2026"
 ```
 
 AgentLoom 会从 `LLAMA_CPP_BUILD/CMakeCache.txt` 推断预编译 llama.cpp 的配置。多配置 VS 工程在构建 `agent_models` 前执行 ABI guard：Release、RelWithDebInfo 和 MinSizeRel 归为 Release CRT，Debug 归为 Debug CRT；两侧类别不同会直接终止构建，而不是继续链接可能崩溃的 runtime。
@@ -206,21 +227,29 @@ Windows 上启用云 LLM 且保持证书校验时，`ca_bundle_path` 是必需�
 
 ### Linux / WSL2
 
-默认脚本构建 CPU Runtime、Gateway、Emotion Server 和测试；VLM Server 需要预先准备 CUDA llama.cpp：
+默认脚本构建 Core/SDK Release、CPU Runtime、Gateway、Emotion Server 和测试；Local LLM 与 Media 默认关闭：
 
 ```bash
-linux/scripts/bootstrap_toolchain.sh
-linux/scripts/prepare_deps.sh
-linux/scripts/configure.sh
-linux/scripts/build.sh
-linux/scripts/test.sh
+bash linux/scripts/bootstrap_toolchain.sh
+bash linux/scripts/prepare_deps.sh
+bash linux/scripts/configure.sh
+bash linux/scripts/build.sh
+bash linux/scripts/check_artifacts.sh
+bash linux/scripts/test.sh
 
 # 可选：启用 VLM inference target
-linux/scripts/configure.sh --inference
-linux/scripts/build.sh --inference
+bash linux/scripts/configure.sh --inference
+bash linux/scripts/build.sh --inference
 ```
 
 Linux 使用独立的 `build/linux-vcpkg-installed`，不会复用或写入 Windows 的仓库根 `vcpkg_installed/`。
+`linux/scripts/test.sh` 默认还会安装 SDK 并构建独立 package consumer；仅运行 CTest 时传入 `--skip-package`。
+
+安装目录也可以单独生成：
+
+```bash
+bash linux/scripts/verify_package.sh
+```
 
 ## 配置与启动
 
@@ -314,20 +343,10 @@ build\x64-Release\Release\multimodal_inference_server.exe `
 
 当前 CMake 测试覆盖 core、TLS/HTTP、异步 LLM/Emotion、配置、SQLite、向量检索与 batch coordinator、语义缓存、文档、记忆、Media/IPC、Persona/Gateway 和 gRPC 边界，并包含跨进程 E2E 与独立 benchmark target。测试数量随功能演进，不在 README 固定硬编码。
 
-```powershell
-cmake -B build/x64-Release-Tests-v145 `
-  -G "Visual Studio 18 2026" -A x64 `
-  -DBERT_BUILD_TESTS=ON `
-  -DBERT_VCPKG_TRIPLET=x64-windows `
-  -DBERT_USE_ONNXRUNTIME_GPU=OFF `
-  -DLLAMA_CPP_ROOT="<path-to-llama.cpp>" `
-  -DLLAMA_CPP_BUILD="<path-to-llama.cpp-build>"
-
-cmake --build `
-  build/x64-Release-Tests-v145 --config Release --parallel
-
-ctest --test-dir build/x64-Release-Tests-v145 `
-  -C Release --output-on-failure
+```bash
+bash linux/scripts/configure.sh
+bash linux/scripts/build.sh
+bash linux/scripts/test.sh
 ```
 
 ## 扩展边界

@@ -28,11 +28,29 @@ set(HF_TOKENIZERS_CARGO_PROFILE "release"
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
+# 根据平台选择 Rust target triple
+if(WIN32)
+    set(HF_TOKENIZERS_RUST_TARGET "x86_64-pc-windows-msvc"
+        CACHE STRING "Rust target triple for hf_tokenizers_capi")
+elseif(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        set(HF_TOKENIZERS_RUST_TARGET "aarch64-apple-darwin"
+            CACHE STRING "Rust target triple for hf_tokenizers_capi")
+    else()
+        set(HF_TOKENIZERS_RUST_TARGET "x86_64-apple-darwin"
+            CACHE STRING "Rust target triple for hf_tokenizers_capi")
+    endif()
+else()
+    # Linux/Unix
+    set(HF_TOKENIZERS_RUST_TARGET "x86_64-unknown-linux-gnu"
+        CACHE STRING "Rust target triple for hf_tokenizers_capi")
+endif()
+
 if(HF_TOKENIZERS_CARGO_PROFILE STREQUAL "release")
-    set(HF_TOKENIZERS_TARGET_SUBDIR "release")
+    set(HF_TOKENIZERS_TARGET_SUBDIR "${HF_TOKENIZERS_RUST_TARGET}/release")
     set(HF_TOKENIZERS_CARGO_FLAG "--release")
 else()
-    set(HF_TOKENIZERS_TARGET_SUBDIR "debug")
+    set(HF_TOKENIZERS_TARGET_SUBDIR "${HF_TOKENIZERS_RUST_TARGET}/debug")
     set(HF_TOKENIZERS_CARGO_FLAG "")
 endif()
 
@@ -53,9 +71,9 @@ set(HF_TOKENIZERS_STATICLIB_PATH
 
 if(HF_TOKENIZERS_CARGO_FLAG)
     set(_hf_cargo_cmd
-        "${CARGO_EXECUTABLE}" build ${HF_TOKENIZERS_CARGO_FLAG})
+        "${CARGO_EXECUTABLE}" build --target "${HF_TOKENIZERS_RUST_TARGET}" ${HF_TOKENIZERS_CARGO_FLAG})
 else()
-    set(_hf_cargo_cmd "${CARGO_EXECUTABLE}" build)
+    set(_hf_cargo_cmd "${CARGO_EXECUTABLE}" build --target "${HF_TOKENIZERS_RUST_TARGET}")
 endif()
 
 file(GLOB_RECURSE HF_TOKENIZERS_RUST_SOURCES

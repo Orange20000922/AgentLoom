@@ -28,7 +28,14 @@ find_package(pugixml CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
 if(WIN32 AND BERT_VCPKG_TRIPLET)
-    file(GLOB VCPKG_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/${BERT_VCPKG_TRIPLET}/bin/*.dll")
+    # x64-windows-release triplet 使用 x64-windows 的 bin 目录
+    # 因为 release-only triplet 不会创建独立的安装目录
+    set(_vcpkg_bin_triplet "${BERT_VCPKG_TRIPLET}")
+    if(_vcpkg_bin_triplet MATCHES "-release$")
+        string(REPLACE "-release" "" _vcpkg_bin_triplet "${_vcpkg_bin_triplet}")
+    endif()
+    file(GLOB VCPKG_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed/${_vcpkg_bin_triplet}/bin/*.dll")
+    unset(_vcpkg_bin_triplet)
 endif()
 
 # ONNX Runtime 预编译二进制
@@ -378,7 +385,7 @@ if(WIN32)
         "${BERT_FAISS_ROOT}/bin/faiss.dll"
         "${BERT_MKL_RUNTIME_ROOT}/Library/bin/mkl_rt.2.dll")
 elseif(UNIX AND NOT APPLE)
-    set(BERT_FAISS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/faiss-1.14.1-cpu-linux" CACHE PATH "Path to Faiss CPU package")
+    set(BERT_FAISS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/faiss-1.10.0-cpu-linux" CACHE PATH "Path to Faiss CPU package")
     set(BERT_MKL_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/deps/mkl-2023.1.0-linux" CACHE PATH "Path to MKL runtime package")
     require_path("${BERT_FAISS_ROOT}/include/faiss/IndexFlat.h" "Faiss headers")
     require_path("${BERT_FAISS_ROOT}/lib/libfaiss.so" "Faiss shared library")
@@ -395,7 +402,26 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 # GStreamer prebuilt package for media/WebRTC probes and future media pipeline work.
-set(GSTREAMER_ROOT "D:/Program Files/gstreamer/1.0/msvc_x86_64" CACHE PATH "Path to GStreamer MSVC x64 package")
+# 探测常见安装路径
+if(WIN32)
+    set(BERT_GSTREAMER_CANDIDATE_PATHS
+        "D:/Program Files/gstreamer/1.0/msvc_x86_64"
+        "C:/gstreamer/1.0/msvc_x86_64"
+        "$ENV{GSTREAMER_1_0_ROOT_MSVC_X86_64}"
+        "C:/Program Files/gstreamer/1.0/msvc_x86_64"
+    )
+    set(BERT_DEFAULT_GSTREAMER_ROOT "")
+    foreach(candidate_path ${BERT_GSTREAMER_CANDIDATE_PATHS})
+        if(EXISTS "${candidate_path}/bin/gst-inspect-1.0.exe")
+            set(BERT_DEFAULT_GSTREAMER_ROOT "${candidate_path}")
+            break()
+        endif()
+    endforeach()
+elseif(UNIX AND NOT APPLE)
+    set(BERT_DEFAULT_GSTREAMER_ROOT "/usr")
+endif()
+
+set(GSTREAMER_ROOT "${BERT_DEFAULT_GSTREAMER_ROOT}" CACHE PATH "Path to GStreamer MSVC x64 package")
 if(AGENTLOOM_BUILD_MEDIA AND EXISTS "${GSTREAMER_ROOT}/bin/gst-inspect-1.0.exe")
     add_library(gstreamer_headers INTERFACE)
     target_include_directories(gstreamer_headers INTERFACE

@@ -79,12 +79,7 @@ if [[ ! -d "$FAISS_ROOT" ]]; then
         cp "$system_faiss" "$FAISS_ROOT/lib/libfaiss.so"
     else
         archive="$DEPS_DIR/libfaiss-linux.conda"
-        if [[ ! -s "$archive" ]]; then
-            log "downloading Faiss from $FAISS_URL"
-            ensure_conda "$FAISS_URL" "$archive"
-        else
-            log "using cached Faiss archive $archive"
-        fi
+        ensure_conda "$FAISS_URL" "$archive" "$FAISS_SHA256"
         extract_conda "$archive" "$FAISS_ROOT"
     fi
 else
@@ -120,61 +115,39 @@ if [[ ! -f "$FAISS_ROOT/lib/libfaiss.so" ]]; then
     fi
 fi
 
-if [[ ! -d "$MKL_ROOT" ]]; then
-    log "preparing MKL runtime"
-    archive="$DEPS_DIR/mkl-linux.conda"
-    ensure_conda "$MKL_URL" "$archive"
-    extract_conda "$archive" "$MKL_ROOT"
-else
-    log "MKL already present at $MKL_ROOT"
-fi
-
-if [[ ! -f "$MKL_ROOT/lib/libmkl_rt.so" ]]; then
-    found="$(find "$MKL_ROOT" -name 'libmkl_rt.so*' -type f -print -quit || true)"
-    [[ -n "$found" ]] || fail "MKL runtime library not found"
-    mkdir -p "$MKL_ROOT/lib"
-    cp "$found" "$MKL_ROOT/lib/libmkl_rt.so"
-fi
-
-if [[ ! -d "$VCPKG_ROOT" ]]; then
-    log "cloning vcpkg"
-    git clone --depth 1 https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
-else
-    log "vcpkg already present at $VCPKG_ROOT"
-fi
-"$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
-
-"$PYTHON_BIN" - "$REPO_ROOT/vcpkg.json" "$VCPKG_ROOT" "$REPO_ROOT/build/linux-vcpkg.json" <<'PY'
+vcpkg_baseline="$("$PYTHON_BIN" - "$REPO_ROOT/vcpkg.json" <<'PY'
 import json
 import pathlib
-import subprocess
 import sys
-
-source = pathlib.Path(sys.argv[1])
-vcpkg = pathlib.Path(sys.argv[2])
-output = pathlib.Path(sys.argv[3])
-data = json.loads(source.read_text(encoding="utf-8"))
-data["builtin-baseline"] = subprocess.check_output(
-    ["git", "-C", str(vcpkg), "rev-parse", "HEAD"],
-    text=True,
-).strip()
-deps = data.setdefault("dependencies", [])
-if "gtest" not in deps:
-    deps.append("gtest")
-output.parent.mkdir(parents=True, exist_ok=True)
-output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["builtin-baseline"])
 PY
+ )"
+
+if [[ ! -d "$VCPKG_ROOT/.git" ]]; then
+    if [[ -d "$VCPKG_ROOT" ]] && [[ -n "$(find "$VCPKG_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+        fail "vcpkg directory exists but is not a git checkout: $VCPKG_ROOT"
+    fi
+    mkdir -p "$VCPKG_ROOT"
+    git -C "$VCPKG_ROOT" init
+    git -C "$VCPKG_ROOT" remote add origin https://github.com/microsoft/vcpkg.git
+fi
+
+current_vcpkg_commit="$(git -C "$VCPKG_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ "$current_vcpkg_commit" != "$vcpkg_baseline" ]]; then
+    log "fetching vcpkg baseline $vcpkg_baseline"
+    git -C "$VCPKG_ROOT" fetch --no-tags origin "$vcpkg_baseline"
+    git -C "$VCPKG_ROOT" checkout --detach FETCH_HEAD
+fi
+"$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
 
 triplet_file="$REPO_ROOT/triplets/ci/$VCPKG_TRIPLET.cmake"
 [[ -f "$triplet_file" ]] || fail "versioned Linux triplet not found: $triplet_file"
 
-manifest_dir="$REPO_ROOT/build/linux-vcpkg-manifest"
-mkdir -p "$manifest_dir"
-cp "$REPO_ROOT/build/linux-vcpkg.json" "$manifest_dir/vcpkg.json"
 VCPKG_MAX_CONCURRENCY="$BUILD_JOBS" "$VCPKG_ROOT/vcpkg" install \
     --triplet "$VCPKG_TRIPLET" \
     --host-triplet "$VCPKG_TRIPLET" \
-    --x-manifest-root="$manifest_dir" \
+    --x-feature=tests \
+    --x-manifest-root="$REPO_ROOT" \
     --x-install-root="$VCPKG_INSTALL_ROOT" \
     --overlay-triplets="$REPO_ROOT/triplets/ci" \
     "--binarysource=clear;files,$VCPKG_BINARY_CACHE,readwrite" \

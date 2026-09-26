@@ -5,9 +5,21 @@ source "$(dirname "$0")/common.sh"
 require_linux
 require_command sudo
 
+enable_media=false
+for arg in "$@"; do
+    case "$arg" in
+        --media|--inference)
+            enable_media=true
+            ;;
+        *)
+            fail "unknown bootstrap option: $arg"
+            ;;
+    esac
+done
+
 log "installing Linux build toolchain"
 sudo apt-get update
-sudo apt-get install -y \
+packages=(
     build-essential \
     ccache \
     cmake \
@@ -22,8 +34,12 @@ sudo apt-get install -y \
     tar \
     unzip \
     zip \
-    libopenblas-dev \
-    libopencv-dev
+    libopenblas-dev
+)
+if [[ "$enable_media" == true ]]; then
+    packages+=(libopencv-dev)
+fi
+sudo apt-get install -y "${packages[@]}"
 
 if ! command -v rustup >/dev/null 2>&1; then
     log "installing rustup"
