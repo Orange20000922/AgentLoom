@@ -100,7 +100,9 @@ if(BERT_BUILD_TESTS)
         GTest::gtest_main
     )
 
-    gtest_discover_tests(core_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(core_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;core")
 
     add_executable(media_inference_tests
         tests/media/grpc_vlm_vision_client_test.cpp
@@ -159,7 +161,9 @@ if(BERT_BUILD_TESTS)
         GTest::gtest_main
     )
 
-    gtest_discover_tests(net_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(net_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;net")
 
     if(TARGET agent_media)
         add_executable(media_tests
@@ -283,7 +287,9 @@ if(BERT_BUILD_TESTS)
 
     copy_runtime_files(storage_tests "${BERT_SQLITE_DLL}")
 
-    gtest_discover_tests(storage_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(storage_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;storage")
 
     add_executable(vector_storage_tests
         tests/storage/vector/vector_storage_test.cpp

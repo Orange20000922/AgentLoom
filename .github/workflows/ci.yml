@@ -15,6 +15,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   linux-tests:
     name: Linux Release Tests
@@ -25,8 +31,15 @@ jobs:
       VCPKG_TRIPLET: x64-linux-release
       VCPKG_INSTALL_ROOT: build/linux-vcpkg-installed
       VCPKG_BINARY_CACHE: build/vcpkg-binary-cache
-      VCPKG_MAX_CONCURRENCY: 2
+      VCPKG_MAX_CONCURRENCY: 4
+      # 4-way cache-miss builds were slower on the 4-vCPU hosted runner; keep
+      # two compiler jobs while allowing vcpkg's independent ports more concurrency.
       CMAKE_BUILD_PARALLEL_LEVEL: 2
+      CCACHE_DIR: ${{ github.workspace }}/build/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_CACHE_VERSION: v2
+      MIN_FREE_DISK_GIB: 35
       DEPS_CACHE_VERSION: v2
       ONNXRUNTIME_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz
       ONNXRUNTIME_ARCHIVE: deps/onnxruntime-linux-x64-1.17.1.tgz
@@ -44,6 +57,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate versioned build inputs
+        shell: bash
+        run: bash ./.github/scripts/validate-build-inputs.sh
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -51,23 +68,26 @@ jobs:
           cache: "pip"
           cache-dependency-path: .github/workflows/ci.yml
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
       - name: Install Python tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install zstandard
 
-      - name: Free disk space
+      - name: Report runner resources
         shell: bash
         run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/share/swift
-          sudo docker image prune -af || true
-          sudo apt-get clean
-          df -h
+          echo "logical_cpus=$(nproc)"
+          free -h
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Ensure build disk space
+        shell: bash
+        run: bash ./.github/scripts/ensure-disk-space.sh
 
       - name: Install build tools and prebuilt small packages
         shell: bash
@@ -85,20 +105,19 @@ jobs:
             libopenblas-dev \
             libopencv-dev
 
-      - name: Cache vcpkg install root
-        id: cache-vcpkg
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary cache
+        id: restore-vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            build/linux-vcpkg-installed
-            build/vcpkg-binary-cache
+          path: build/vcpkg-binary-cache
           key: ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-features-tests-${{ hashFiles('vcpkg.json', 'triplets/ci/x64-linux-release.cmake') }}
           restore-keys: |
             ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-features-tests-
+            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-vcpkg-
 
-      - name: Cache binary dependency archives
-        id: cache-dependency-archives
-        uses: actions/cache@v4
+      - name: Restore binary dependency archives
+        id: restore-dependency-archives
+        uses: actions/cache/restore@v4
         with:
           path: |
             deps/*.tgz
@@ -109,13 +128,32 @@ jobs:
           restore-keys: |
             ${{ env.CACHE_PLATFORM }}-ci-deps-
 
-      - name: Cache compiler outputs
-        uses: actions/cache@v4
+      - name: Restore compiler outputs
+        id: restore-compiler-cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ccache
-          key: ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-ccache-${{ github.sha }}
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-ccache-${{ env.CCACHE_CACHE_VERSION }}-${{ github.sha }}
           restore-keys: |
-            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-ccache-
+            ${{ env.CACHE_PLATFORM }}-${{ env.VCPKG_TRIPLET }}-ccache-${{ env.CCACHE_CACHE_VERSION }}-
+
+      - name: Cache Rust dependencies and tokenizer outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hf-tokenizers-v1
+          workspaces: third_party/hf_tokenizers_capi -> target
+
+      - name: Verify tokenizer FFI
+        working-directory: third_party/hf_tokenizers_capi
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked --release
+          c++ -std=c++20 -Iinclude tests/ffi_smoke.cpp \
+            target/release/libhf_tokenizers_capi.a \
+            -lpthread -ldl -lm -o target/ffi_smoke
+          target/ffi_smoke
 
       - name: Bootstrap vcpkg
         shell: bash
@@ -140,6 +178,7 @@ jobs:
         run: |
           ./vcpkg/vcpkg install \
             --triplet "$VCPKG_TRIPLET" \
+            --host-triplet "$VCPKG_TRIPLET" \
             --x-feature=tests \
             --x-manifest-root="$GITHUB_WORKSPACE" \
             --x-install-root="$GITHUB_WORKSPACE/$VCPKG_INSTALL_ROOT" \
@@ -147,6 +186,13 @@ jobs:
             "--binarysource=clear;files,$GITHUB_WORKSPACE/$VCPKG_BINARY_CACHE,readwrite" \
             --clean-after-build
           ln -s "$GITHUB_WORKSPACE/$VCPKG_INSTALL_ROOT" "$GITHUB_WORKSPACE/vcpkg_installed"
+
+      - name: Save vcpkg binary cache
+        if: steps.restore-vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/vcpkg-binary-cache
+          key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Download ONNX Runtime
         shell: bash
@@ -320,6 +366,17 @@ jobs:
             fi
           fi
 
+      - name: Save binary dependency archives
+        if: steps.restore-dependency-archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            deps/*.tgz
+            deps/*.tar.gz
+            deps/*.zip
+            deps/*.conda
+          key: ${{ steps.restore-dependency-archives.outputs.cache-primary-key }}
+
       - name: Verify Linux native dependencies
         shell: bash
         run: |
@@ -337,34 +394,33 @@ jobs:
 
       - name: Configure tests
         shell: bash
-        env:
-          CCACHE_BASEDIR: ${{ github.workspace }}
-          CCACHE_COMPILERCHECK: content
-          CCACHE_DIR: ~/.cache/ccache
         run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=cache_dir="$CCACHE_DIR"
           ccache --set-config=max_size=500M
           ccache --zero-stats || true
+          ccache --show-config
           cmake -S . -B "$BUILD_DIR" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DBERT_BUILD_TESTS=ON \
+            -DBERT_BUILD_MULTIMODAL_INFERENCE_SERVER=OFF \
             -DBERT_VCPKG_TRIPLET="$VCPKG_TRIPLET" \
             -DBERT_USE_ONNXRUNTIME_GPU=OFF \
             -DBERT_OPENBLAS_LIBRARY="$BERT_OPENBLAS_LIBRARY" \
             -DONNXRUNTIME_CPU_ROOT="$GITHUB_WORKSPACE/$ONNXRUNTIME_ROOT" \
+            -DAGENTLOOM_BUILD_LOCAL_LLM=OFF \
+            -DAGENTLOOM_BUILD_MEDIA=OFF \
             -DLLAMA_CPP_ROOT="$GITHUB_WORKSPACE/$LLAMA_CPP_ROOT" \
             -DLLAMA_CPP_BUILD="$GITHUB_WORKSPACE/$LLAMA_CPP_BUILD" \
             -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4
 
-      - name: Build test targets
+      - name: Build SDK and test targets
         shell: bash
-        env:
-          CCACHE_BASEDIR: ${{ github.workspace }}
-          CCACHE_COMPILERCHECK: content
-          CCACHE_DIR: ~/.cache/ccache
         run: |
           cmake --build "$BUILD_DIR" --target \
+            agentloom_sdk \
             core_tests \
             net_tests \
             http_client_tests \
@@ -373,51 +429,38 @@ jobs:
             semantic_cache_tests \
             document_tests \
             config_tests \
-            service_tests \
+            persona_runtime_tests \
+            gateway_service_tests \
             async_grpc_runtime_tests \
             --parallel
-          ccache --show-stats || true
+          ccache --show-stats --verbose || true
+
+      - name: Save compiler outputs
+        if: always() && steps.restore-compiler-cache.outcome == 'success' && steps.restore-compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.restore-compiler-cache.outputs.cache-primary-key }}
 
       - name: Run tests
         shell: bash
         run: |
           ctest --test-dir "$BUILD_DIR" -C Release \
-            -R "(Core|Net|HttpClient|Tls|Storage|SemanticCache|Document|Config|PersonaGateway|SessionManager|PersonaRuntime|PersonaAlgorithm|AsyncGrpcRuntime)" \
+            -L ci -E "(ReloadBatchCycle|RedisV2Batches)" \
             --output-on-failure
-
-      - name: Configure minimal package
-        shell: bash
-        env:
-          CCACHE_BASEDIR: ${{ github.workspace }}
-          CCACHE_COMPILERCHECK: content
-          CCACHE_DIR: ~/.cache/ccache
-        run: |
-          cmake -S . -B build/gha-linux-package \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DBERT_BUILD_TESTS=OFF \
-            -DBERT_VCPKG_TRIPLET="$VCPKG_TRIPLET" \
-            -DBERT_USE_ONNXRUNTIME_GPU=OFF \
-            -DBERT_OPENBLAS_LIBRARY="$BERT_OPENBLAS_LIBRARY" \
-            -DONNXRUNTIME_CPU_ROOT="$GITHUB_WORKSPACE/$ONNXRUNTIME_ROOT" \
-            -DAGENTLOOM_BUILD_LOCAL_LLM=OFF \
-            -DAGENTLOOM_BUILD_MEDIA=OFF \
-            -DAGENTLOOM_BUILD_REFERENCE_GATEWAY=OFF \
-            -DAGENTLOOM_BUILD_TOOLS=OFF \
-            -DBERT_BUILD_MULTIMODAL_INFERENCE_SERVER=OFF
 
       - name: Verify installed package consumer
         shell: bash
         run: |
           cmake \
             -DAGENTLOOM_SOURCE_DIR="$GITHUB_WORKSPACE" \
-            -DAGENTLOOM_PACKAGE_BUILD_DIR="$GITHUB_WORKSPACE/build/gha-linux-package" \
-            -DAGENTLOOM_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/gha-linux-package-install" \
-            -DAGENTLOOM_CONSUMER_BUILD_DIR="$GITHUB_WORKSPACE/build/gha-linux-package-consumer" \
+            -DAGENTLOOM_PACKAGE_BUILD_DIR="$GITHUB_WORKSPACE/$BUILD_DIR" \
+            -DAGENTLOOM_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/gha-linux-tests-install" \
+            -DAGENTLOOM_CONSUMER_BUILD_DIR="$GITHUB_WORKSPACE/build/gha-linux-tests-consumer" \
             -DAGENTLOOM_CONSUMER_GENERATOR=Ninja \
             -DAGENTLOOM_CONSUMER_BUILD_TYPE=Release \
             -DAGENTLOOM_CONSUMER_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DAGENTLOOM_CONSUMER_TRIPLET="$VCPKG_TRIPLET" \
             -DAGENTLOOM_CONSUMER_VCPKG_INSTALLED_DIR="$GITHUB_WORKSPACE/$VCPKG_INSTALL_ROOT" \
+            -DAGENTLOOM_CONSUMER_BOOST_ROOT="$GITHUB_WORKSPACE/deps/boost_1_85_0" \
             -P cmake/AgentLoomPackageConsumerTest.cmake

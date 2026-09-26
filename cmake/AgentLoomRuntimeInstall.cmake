@@ -114,6 +114,15 @@ if(WIN32 AND BERT_VCPKG_TRIPLET AND NOT VCPKG_RUNTIME_DLLS)
     if(TARGET config_tests)
         list(APPEND BERT_RUNTIME_COPY_TARGETS config_tests)
     endif()
+    if(TARGET persona_runtime_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS persona_runtime_tests)
+    endif()
+    if(TARGET gateway_service_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS gateway_service_tests)
+    endif()
+    if(TARGET media_skill_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS media_skill_tests)
+    endif()
     foreach(target ${BERT_RUNTIME_COPY_TARGETS})
         copy_runtime_files(${target} ${VCPKG_RUNTIME_DLLS})
     endforeach()
@@ -152,9 +161,41 @@ if(UNIX AND NOT APPLE AND BERT_VCPKG_TRIPLET)
     if(TARGET config_tests)
         list(APPEND BERT_RUNTIME_COPY_TARGETS config_tests)
     endif()
-    foreach(target ${BERT_RUNTIME_COPY_TARGETS})
-        copy_runtime_files(${target} ${VCPKG_RUNTIME_SOS})
-    endforeach()
+    if(TARGET persona_runtime_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS persona_runtime_tests)
+    endif()
+    if(TARGET gateway_service_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS gateway_service_tests)
+    endif()
+    if(TARGET media_skill_tests)
+        list(APPEND BERT_RUNTIME_COPY_TARGETS media_skill_tests)
+    endif()
+    if(VCPKG_RUNTIME_SOS AND BERT_RUNTIME_COPY_TARGETS)
+        set(_agentloom_vcpkg_runtime_stamp
+            "${CMAKE_CURRENT_BINARY_DIR}/.agentloom-vcpkg-runtime.stamp")
+        set(_agentloom_vcpkg_runtime_copy_commands "")
+        foreach(runtime_file IN LISTS VCPKG_RUNTIME_SOS)
+            list(APPEND _agentloom_vcpkg_runtime_copy_commands
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${runtime_file}"
+                    "${CMAKE_CURRENT_BINARY_DIR}")
+        endforeach()
+
+        # Linux 单配置构建的可执行文件共享同一输出目录；统一复制可避免多个
+        # POST_BUILD 命令并行写入同名版本化 so/symlink 时发生随机竞态。
+        add_custom_command(
+            OUTPUT "${_agentloom_vcpkg_runtime_stamp}"
+            ${_agentloom_vcpkg_runtime_copy_commands}
+            COMMAND ${CMAKE_COMMAND} -E touch "${_agentloom_vcpkg_runtime_stamp}"
+            DEPENDS ${VCPKG_RUNTIME_SOS}
+            VERBATIM)
+        add_custom_target(agentloom_vcpkg_runtime_files
+            DEPENDS "${_agentloom_vcpkg_runtime_stamp}")
+
+        foreach(target IN LISTS BERT_RUNTIME_COPY_TARGETS)
+            add_dependencies(${target} agentloom_vcpkg_runtime_files)
+        endforeach()
+    endif()
 endif()
 
 # 复制 CUDA / cuDNN 运行时库（如果存在）

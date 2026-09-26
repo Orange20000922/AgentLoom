@@ -89,7 +89,9 @@ if(BERT_BUILD_TESTS)
         agent_tls
         GTest::gtest_main
     )
-    gtest_discover_tests(tls_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(tls_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;tls")
 endif()
 
 # ──────────── Outbound HTTP/HTTPS client (reusable for LLM, RAG, webhooks) ────────────
@@ -131,7 +133,9 @@ if(BERT_BUILD_TESTS)
         agent_http_client
         GTest::gtest_main
     )
-    gtest_discover_tests(http_client_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(http_client_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;http-client")
 endif()
 
 # ──────────── LLM client (OpenAI-compatible) ────────────

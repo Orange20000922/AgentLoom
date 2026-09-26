@@ -21,7 +21,7 @@ artifacts=(
     memory_tests
     vector_tests
     config_tests
-    service_tests
+    persona_runtime_tests
     llm_tests
     llm_integration_tests
     l3_compression_e2e_test
@@ -30,6 +30,13 @@ artifacts=(
     agent_gateway_server
     emotion_inference_server
 )
+
+if [[ -x "$BUILD_DIR/gateway_service_tests" ]]; then
+    artifacts+=(gateway_service_tests)
+fi
+if [[ -x "$BUILD_DIR/media_skill_tests" ]]; then
+    artifacts+=(media_skill_tests)
+fi
 
 include_inference=false
 for arg in "$@"; do

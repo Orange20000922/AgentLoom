@@ -355,46 +355,74 @@ if(BERT_BUILD_TESTS)
         agent_agent_runtime
     )
 
-    add_executable(service_tests
+    function(agentloom_configure_service_test_target target labels)
+        target_include_directories(${target} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+        copy_runtime_files(${target} "${BERT_SQLITE_DLL}")
+        copy_runtime_files(${target} ${BERT_FAISS_RUNTIME_FILES})
+        copy_runtime_files(${target} ${VCPKG_RUNTIME_DLLS})
+        gtest_discover_tests(${target}
+            DISCOVERY_MODE PRE_TEST
+            PROPERTIES LABELS "${labels}")
+    endfunction()
+
+    add_executable(persona_runtime_tests
         tests/service/persona_algorithm_test.cpp
-        tests/service/session_manager_test.cpp
         tests/service/session_persistence_contract_test.cpp
         tests/service/persona_runtime_test.cpp
         tests/service/semantic_memory_context_provider_test.cpp
-        tests/service/media_inference_execution_test.cpp
         tests/service/emotion_fusion_analyzer_test.cpp
-        tests/service/gateway_foundation_test.cpp
-        tests/service/persona_gateway_service_test.cpp
         tests/service/skill_registry_test.cpp
         tests/service/skill_prompt_compiler_test.cpp
     )
 
-    target_link_libraries(service_tests PRIVATE
-        agent_service
+    target_link_libraries(persona_runtime_tests PRIVATE
+        agent_agent_runtime
+        agent_gateway_foundation
         GTest::gtest_main
     )
+    agentloom_configure_service_test_target(
+        persona_runtime_tests "service;persona;ci")
+
+    if(AGENTLOOM_BUILD_REFERENCE_GATEWAY)
+        add_executable(gateway_service_tests
+            tests/service/session_manager_test.cpp
+            tests/service/gateway_foundation_test.cpp
+            tests/service/persona_gateway_service_test.cpp
+        )
+        target_link_libraries(gateway_service_tests PRIVATE
+            agent_service
+            GTest::gtest_main
+        )
+        link_whole_archive(gateway_service_tests agent_agent_gateway)
+        link_whole_archive(gateway_service_tests agent_classroom_gateway)
+        link_whole_archive(gateway_service_tests agent_training_report_gateway)
+        link_whole_archive(gateway_service_tests agent_document_gateway)
+        agentloom_configure_service_test_target(
+            gateway_service_tests "service;gateway;ci")
+    endif()
 
     if(TARGET agent_skill_media)
-        target_link_libraries(service_tests PRIVATE
+        add_executable(media_skill_tests
+            tests/service/media_inference_execution_test.cpp
+            tests/service/skill_vision_event_sink_test.cpp
+        )
+        target_link_libraries(media_skill_tests PRIVATE
             agent_skill_media
+            GTest::gtest_main
         )
         # Skill 的静态注册对象可能没有其它符号引用，必须 whole-archive 保证注册发生。
-        link_whole_archive(service_tests agent_skill_media)
+        link_whole_archive(media_skill_tests agent_skill_media)
+        agentloom_configure_service_test_target(
+            media_skill_tests "service;media")
     endif()
 
-    target_include_directories(service_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    )
-
-    copy_runtime_files(service_tests "${BERT_SQLITE_DLL}")
-    copy_runtime_files(service_tests ${BERT_FAISS_RUNTIME_FILES})
-    copy_runtime_files(service_tests ${VCPKG_RUNTIME_DLLS})
-    if(AGENTLOOM_BUILD_REFERENCE_GATEWAY)
-        link_whole_archive(service_tests agent_agent_gateway)
-        link_whole_archive(service_tests agent_classroom_gateway)
-        link_whole_archive(service_tests agent_training_report_gateway)
-        link_whole_archive(service_tests agent_document_gateway)
+    add_custom_target(agentloom_service_tests
+        DEPENDS persona_runtime_tests)
+    if(TARGET gateway_service_tests)
+        add_dependencies(agentloom_service_tests gateway_service_tests)
     endif()
-
-    gtest_discover_tests(service_tests DISCOVERY_MODE PRE_TEST)
+    if(TARGET media_skill_tests)
+        add_dependencies(agentloom_service_tests media_skill_tests)
+    endif()
 endif()

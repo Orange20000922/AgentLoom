@@ -162,7 +162,9 @@ if(BERT_BUILD_TESTS)
         GTest::gtest_main
     )
 
-    gtest_discover_tests(semantic_cache_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(semantic_cache_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;semantic-cache")
 
     add_executable(document_tests
         tests/document/ooxml_extractor_test.cpp
@@ -177,7 +179,9 @@ if(BERT_BUILD_TESTS)
     copy_runtime_files(document_tests "${BERT_SQLITE_DLL}")
     copy_runtime_files(document_tests ${VCPKG_RUNTIME_DLLS})
 
-    gtest_discover_tests(document_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(document_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;document")
 
     add_executable(l0_benchmark
         tests/semantic_cache/l0_benchmark.cpp

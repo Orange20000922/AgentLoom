@@ -3,11 +3,13 @@ project(AgentLoomPackageConsumer LANGUAGES CXX)
 
 find_package(AgentLoom CONFIG REQUIRED)
 
-add_library(agentloom_package_consumer_section STATIC consumer_config_section.cpp)
+add_library(agentloom_package_consumer_section OBJECT consumer_config_section.cpp)
 target_compile_features(agentloom_package_consumer_section PRIVATE cxx_std_20)
 target_link_libraries(agentloom_package_consumer_section PRIVATE AgentLoom::config)
 
-add_executable(agentloom_package_consumer main.cpp)
+add_executable(agentloom_package_consumer
+    main.cpp
+    $<TARGET_OBJECTS:agentloom_package_consumer_section>)
 target_compile_features(agentloom_package_consumer PRIVATE cxx_std_20)
 target_link_libraries(agentloom_package_consumer PRIVATE
     AgentLoom::core
@@ -16,11 +18,9 @@ target_link_libraries(agentloom_package_consumer PRIVATE
     AgentLoom::gateway
     AgentLoom::gateway_foundation
     AgentLoom::gateway_routing
-    AgentLoom::persona_interaction
-    AgentLoom::config)
+    AgentLoom::persona_interaction)
 
 agentloom_link_whole_archive(agentloom_package_consumer AgentLoom::config)
-agentloom_link_whole_archive(agentloom_package_consumer agentloom_package_consumer_section)
 
 enable_testing()
 add_test(NAME agentloom_package_consumer COMMAND agentloom_package_consumer)

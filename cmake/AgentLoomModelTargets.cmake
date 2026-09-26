@@ -198,5 +198,7 @@ if(BERT_BUILD_TESTS)
     endif()
     link_whole_archive(config_tests agent_config)
 
-    gtest_discover_tests(config_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(config_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;config")
 endif()

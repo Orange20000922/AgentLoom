@@ -166,7 +166,9 @@ if(BERT_BUILD_TESTS)
     )
 
     copy_runtime_files(async_grpc_runtime_tests ${VCPKG_RUNTIME_DLLS})
-    gtest_discover_tests(async_grpc_runtime_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(async_grpc_runtime_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci;unit;grpc-runtime")
 
     add_executable(shared_media_runtime_tests
         tests/server/shared_memory_media_runtime_test.cpp

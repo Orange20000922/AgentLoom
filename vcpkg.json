@@ -10,9 +10,6 @@
     "hiredis",
     "redis-plus-plus",
     "nlohmann-json",
-    "boost-asio",
-    "boost-interprocess",
-    "boost-redis",
     "libzip",
     "pugixml"
   ],

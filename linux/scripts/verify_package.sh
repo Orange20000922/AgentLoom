@@ -14,6 +14,7 @@ cmake --install "$BUILD_DIR" --prefix "$LINUX_INSTALL_DIR"
 cmake -S "$REPO_ROOT/tests/package/consumer" -B "$PACKAGE_CONSUMER_BUILD_DIR" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBOOST_ROOT="$BOOST_ROOT" \
     "-DCMAKE_PREFIX_PATH=$LINUX_INSTALL_DIR;$VCPKG_INSTALL_ROOT"
 cmake --build "$PACKAGE_CONSUMER_BUILD_DIR" --parallel "$BUILD_JOBS"
 "$PACKAGE_CONSUMER_BUILD_DIR/agentloom_package_consumer"

@@ -20,6 +20,16 @@ permissions:
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Match the measured CI optimum for full C++ cache-miss builds.
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  VCPKG_MAX_CONCURRENCY: 4
+  CCACHE_DIR: ${{ github.workspace }}/build/ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_CACHE_VERSION: v2
+  MIN_FREE_DISK_GIB: 35
 
 jobs:
   build:
@@ -45,6 +55,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate versioned build inputs
+        shell: bash
+        run: bash ./.github/scripts/validate-build-inputs.sh
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -52,34 +66,34 @@ jobs:
           cache: "pip"
           cache-dependency-path: .github/workflows/release.yml
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install Python tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install onnx grpcio protobuf
 
-      - name: Free disk space
+      - name: Report runner resources
         shell: bash
         run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/share/swift
-          sudo docker image prune -af || true
-          sudo apt-get clean
-          df -h
+          echo "logical_cpus=$(nproc)"
+          free -h
+          df -h "$GITHUB_WORKSPACE"
 
-      - name: Cache vcpkg install root
-        id: cache-vcpkg
-        uses: actions/cache@v4
+      - name: Ensure build disk space
+        shell: bash
+        run: bash ./.github/scripts/ensure-disk-space.sh
+
+      - name: Restore vcpkg binary cache
+        id: restore-vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            build/linux-vcpkg-installed
-            build/vcpkg-binary-cache
+          path: build/vcpkg-binary-cache
           key: ${{ matrix.os }}-${{ matrix.triplet }}-vcpkg-features-core-${{ hashFiles('vcpkg.json', 'triplets/ci/x64-linux-release.cmake') }}
           restore-keys: |
             ${{ matrix.os }}-${{ matrix.triplet }}-vcpkg-features-core-
+            ${{ matrix.os }}-${{ matrix.triplet }}-vcpkg-
 
       - name: Cache ONNX Runtime archive
         uses: actions/cache@v4
@@ -92,13 +106,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build pkg-config curl tar unzip zip ccache
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - name: Restore compiler outputs
+        id: restore-compiler-cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.cache/ccache
-          key: ${{ matrix.os }}-${{ matrix.triplet }}-ccache-${{ github.sha }}
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ matrix.os }}-${{ matrix.triplet }}-ccache-${{ env.CCACHE_CACHE_VERSION }}-${{ github.sha }}
           restore-keys: |
-            ${{ matrix.os }}-${{ matrix.triplet }}-ccache-
+            ${{ matrix.os }}-${{ matrix.triplet }}-ccache-${{ env.CCACHE_CACHE_VERSION }}-
+
+      - name: Cache Rust dependencies and tokenizer outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hf-tokenizers-release-v1
+          workspaces: third_party/hf_tokenizers_capi -> target
 
       - name: Bootstrap vcpkg
         shell: bash
@@ -123,12 +144,20 @@ jobs:
         run: |
           ./vcpkg/vcpkg install \
             --triplet ${{ matrix.triplet }} \
+            --host-triplet ${{ matrix.triplet }} \
             --x-manifest-root="$GITHUB_WORKSPACE" \
             --x-install-root="$GITHUB_WORKSPACE/build/linux-vcpkg-installed" \
             --overlay-triplets="$GITHUB_WORKSPACE/triplets/ci" \
             "--binarysource=clear;files,$GITHUB_WORKSPACE/build/vcpkg-binary-cache,readwrite" \
             --clean-after-build
           ln -s "$GITHUB_WORKSPACE/build/linux-vcpkg-installed" "$GITHUB_WORKSPACE/vcpkg_installed"
+
+      - name: Save vcpkg binary cache
+        if: steps.restore-vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/vcpkg-binary-cache
+          key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Download ONNX Runtime
         shell: bash
@@ -142,13 +171,12 @@ jobs:
 
       - name: Configure
         shell: bash
-        env:
-          CCACHE_BASEDIR: ${{ github.workspace }}
-          CCACHE_COMPILERCHECK: content
-          CCACHE_DIR: ~/.cache/ccache
         run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=cache_dir="$CCACHE_DIR"
           ccache --set-config=max_size=500M
           ccache --zero-stats || true
+          ccache --show-config
           cmake -S . -B "${{ matrix.build_dir }}" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -159,13 +187,16 @@ jobs:
 
       - name: Build
         shell: bash
-        env:
-          CCACHE_BASEDIR: ${{ github.workspace }}
-          CCACHE_COMPILERCHECK: content
-          CCACHE_DIR: ~/.cache/ccache
         run: |
           cmake --build "${{ matrix.build_dir }}" --parallel
-          ccache --show-stats || true
+          ccache --show-stats --verbose || true
+
+      - name: Save compiler outputs
+        if: always() && steps.restore-compiler-cache.outcome == 'success' && steps.restore-compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.restore-compiler-cache.outputs.cache-primary-key }}
 
       - name: Generate smoke-test model
         run: |

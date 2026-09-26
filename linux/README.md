@@ -70,13 +70,19 @@ The scripts derive paths from the current checkout root, so both `/mnt/d/...` an
 
 `bootstrap_toolchain.sh` creates a private Python virtual environment at `build/linux-python-venv`.
 This avoids Ubuntu/WSL externally-managed Python restrictions and keeps `zstandard` out of the
-system Python installation.
+system Python installation. Rust uses the repository `rust-toolchain.toml`, matching CI's stable,
+minimal toolchain with `rustfmt` and `clippy` components.
 
 gRPC is still built through vcpkg for ABI consistency, but the scripts use a release-only triplet,
+use the same release-only triplet for host code-generation tools,
 an isolated Linux install root at `build/linux-vcpkg-installed`, and a local vcpkg binary cache at
 `build/vcpkg-binary-cache`. The isolated install root keeps WSL/Linux package state separate from
 the Windows `vcpkg_installed` tree. The first gRPC build can still be slow; later runs should restore
-the cached package instead of rebuilding it. Increase parallelism on a larger machine with:
+the cached package instead of rebuilding it. The versioned triplet lives at
+`triplets/ci/x64-linux-release.cmake`; do not replace it with a generated or machine-local file.
+The package-consumer verification also receives the prepared Boost 1.85 source root explicitly, so
+it validates the same public-header ABI used to build the SDK instead of resolving another Boost.
+Increase parallelism on a larger machine with:
 
 ```bash
 BUILD_JOBS=4 bash linux/scripts/prepare_deps.sh

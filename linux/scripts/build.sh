@@ -19,7 +19,7 @@ targets=(
     memory_tests
     vector_tests
     config_tests
-    service_tests
+    persona_runtime_tests
     llm_tests
     llm_integration_tests
     l3_compression_e2e_test
@@ -30,6 +30,13 @@ targets=(
     bert_inference_client
     bert_benchmark_client
 )
+
+if cmake --build "$BUILD_DIR" --target help | grep -q 'gateway_service_tests'; then
+    targets+=(gateway_service_tests)
+fi
+if cmake --build "$BUILD_DIR" --target help | grep -q 'media_skill_tests'; then
+    targets+=(media_skill_tests)
+fi
 
 if [[ "${1:-}" == "--inference" ]]; then
     has_cuda_llama_binary || fail "--inference requires a prepared CUDA llama.cpp binary"

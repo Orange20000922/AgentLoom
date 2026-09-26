@@ -32,7 +32,7 @@ ctest_args=(--test-dir "$BUILD_DIR" -C Release --output-on-failure)
 if [[ "$run_all" != true ]]; then
     excludes=("NOT_BUILT")
     if [[ "$include_redis" != true ]]; then
-        excludes+=("ReloadBatchCycle")
+        excludes+=("ReloadBatchCycle" "RedisV2Batches")
     fi
 
     exclude_regex="$(IFS='|'; echo "${excludes[*]}")"

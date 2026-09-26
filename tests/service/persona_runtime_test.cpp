@@ -2,7 +2,6 @@
 #include "gateway_session_affinity_scheduler.h"
 #include "runtime_maintenance_service.h"
 #include "skill_session_manager.h"
-#include "skill_vision_event_sink.h"
 
 #include <gtest/gtest.h>
 
@@ -12,6 +11,26 @@
 #include <thread>
 
 namespace {
+
+class RuntimeTriggeredStatefulSkill final
+    : public agent::service::persona::IStatefulSkillExecution {
+public:
+    explicit RuntimeTriggeredStatefulSkill(
+        agent::service::persona::StatefulSkillExecutionContext context)
+        : context_(std::move(context)) {}
+
+    core::Status Start() override { return core::Status::Ok(); }
+
+    core::Status Stop(
+        const agent::service::persona::SkillSessionStopRequest& request) override {
+        return context_.sessions->Stop(request).status();
+    }
+
+private:
+    agent::service::persona::StatefulSkillExecutionContext context_;
+};
+
+REGISTER_STATEFUL_SKILL(RuntimeTriggeredStatefulSkill, "test.runtime.triggered", "1.0.0");
 
 using agent::llm::ChatCompletionRequest;
 using agent::llm::ChatCompletionResponse;
@@ -39,8 +58,6 @@ using agent::service::persona::SkillSessionOptions;
 using agent::service::persona::SkillSessionStartRequest;
 using agent::service::persona::SkillSessionState;
 using agent::service::persona::SkillSessionStopRequest;
-using agent::service::persona::SkillVisionEventSink;
-using agent::service::persona::SkillVisionEventSinkOptions;
 using agent::service::persona::ToolMemoryContext;
 using agent::service::persona::ToolMemoryHit;
 using agent::service::persona::ToolMemoryQuery;
@@ -1310,7 +1327,7 @@ TEST(PersonaRuntimeTest, InjectsTriggeredL4ToolMemoryIntoSystemPrompt) {
     io.Shutdown(true);
 }
 
-TEST(PersonaRuntimeTest, StartsVisionSkillSessionWhenL4VisionToolIsTriggered) {
+TEST(PersonaRuntimeTest, StartsStatefulSkillSessionWhenL4ToolIsTriggered) {
     core::ThreadPool compute({1, 32, "runtime-compute"});
     core::ThreadPool io({1, 32, "runtime-io"});
     ASSERT_TRUE(compute.Start().ok());
@@ -1325,7 +1342,7 @@ TEST(PersonaRuntimeTest, StartsVisionSkillSessionWhenL4VisionToolIsTriggered) {
     auto emotion = std::make_shared<NeutralEmotionAnalyzer>();
     auto llm = std::make_shared<FakeLlmClient>();
     auto tool_memory = std::make_shared<FakeToolMemoryProvider>();
-    tool_memory->hits.push_back(ToolMemoryHit{.tool_id = "vision.observe"});
+    tool_memory->hits.push_back(ToolMemoryHit{.tool_id = "test.runtime.triggered"});
     auto skill_sessions = std::make_shared<SkillSessionManager>();
     PersonaRuntime runtime(
         sessions,
@@ -1353,7 +1370,7 @@ TEST(PersonaRuntimeTest, StartsVisionSkillSessionWhenL4VisionToolIsTriggered) {
     auto result = future.get();
     ASSERT_TRUE(result.ok()) << result.status().message();
 
-    auto session = skill_sessions->Get("session-runtime", "vision.observe");
+    auto session = skill_sessions->Get("session-runtime", "test.runtime.triggered");
     ASSERT_TRUE(session.ok()) << session.status().message();
     ASSERT_TRUE(session.value().has_value());
     EXPECT_EQ(session.value()->state, SkillSessionState::Starting);
@@ -1361,7 +1378,9 @@ TEST(PersonaRuntimeTest, StartsVisionSkillSessionWhenL4VisionToolIsTriggered) {
     std::lock_guard lock(llm->mutex_);
     ASSERT_FALSE(llm->last_request.messages.empty());
     EXPECT_NE(llm->last_request.messages.front().content.find("<skill_status"), std::string::npos);
-    EXPECT_NE(llm->last_request.messages.front().content.find("vision.observe"), std::string::npos);
+    EXPECT_NE(
+        llm->last_request.messages.front().content.find("test.runtime.triggered"),
+        std::string::npos);
 
     compute.Shutdown(true);
     io.Shutdown(true);
@@ -1641,63 +1660,6 @@ TEST(SkillSessionManagerTest, ExpiresClosingSessionThatMissesAtomicDrainDeadline
     ASSERT_TRUE(current.ok());
     ASSERT_TRUE(current.value().has_value());
     EXPECT_EQ(current.value()->state, SkillSessionState::Expired);
-}
-
-TEST(SkillVisionEventSinkTest, RecordsVisionEventAsSkillObservation) {
-    auto manager = std::make_shared<SkillSessionManager>();
-    SkillVisionEventSink sink(manager);
-
-    media::VisionEvent event;
-    event.event_id = "vision-event-1";
-    event.session_id = "session-runtime";
-    event.trace_id = "trace-vision-event";
-    event.peak_frame_id = 7;
-    event.representative_frame_id = 7;
-    event.peak_score = 0.81;
-    media::VisionAnalysis analysis;
-    analysis.agent_hint = "画面中检测到明显移动";
-    analysis.confidence = 0.76;
-    analysis.facts = {"画面中有移动"};
-    event.analysis = analysis;
-
-    auto status = sink.Publish(event);
-
-    ASSERT_TRUE(status.ok()) << status.message();
-    auto session = manager->Get("session-runtime", "vision.observe");
-    ASSERT_TRUE(session.ok()) << session.status().message();
-    ASSERT_TRUE(session.value().has_value());
-    EXPECT_EQ(session.value()->state, SkillSessionState::Running);
-    EXPECT_EQ(session.value()->last_observation, "画面中检测到明显移动");
-    ASSERT_EQ(session.value()->recent_observations.size(), 1u);
-    EXPECT_EQ(session.value()->recent_observations[0].confidence, 0.76);
-    EXPECT_NE(session.value()->recent_observations[0].metadata_json.find("vision-event-1"), std::string::npos);
-}
-
-TEST(SkillVisionEventSinkTest, DuplicateVisionEventIsRecordedButNotInjected) {
-    auto manager = std::make_shared<SkillSessionManager>();
-    SkillVisionEventSinkOptions options;
-    options.min_prompt_confidence = 0.1;
-    SkillVisionEventSink sink(manager, options);
-
-    media::VisionEvent event;
-    event.event_id = "vision-event-duplicate";
-    event.session_id = "session-runtime";
-    event.trace_id = "trace-vision-event";
-    event.peak_score = 0.91;
-    event.duplicate = true;
-    event.analysis = media::VisionAnalysis{.agent_hint = "重复视觉事件", .confidence = 0.8};
-
-    auto status = sink.Publish(event);
-
-    ASSERT_TRUE(status.ok()) << status.message();
-    auto session = manager->Get("session-runtime", "vision.observe");
-    ASSERT_TRUE(session.ok()) << session.status().message();
-    ASSERT_TRUE(session.value().has_value());
-    EXPECT_EQ(session.value()->state, SkillSessionState::Running);
-    EXPECT_TRUE(session.value()->last_observation.empty());
-    ASSERT_EQ(session.value()->recent_observations.size(), 1u);
-    EXPECT_TRUE(session.value()->recent_observations[0].stale);
-    EXPECT_FALSE(session.value()->recent_observations[0].should_inject_prompt);
 }
 
 } // namespace

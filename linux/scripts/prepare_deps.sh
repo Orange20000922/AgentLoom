@@ -7,6 +7,7 @@ for command in curl git python3 tar unzip; do
     require_command "$command"
 done
 [[ -x "$PYTHON_BIN" ]] || fail "Python venv not found at $PYTHON_BIN; run linux/scripts/bootstrap_toolchain.sh first"
+bash "$REPO_ROOT/.github/scripts/validate-build-inputs.sh"
 
 mkdir -p "$DEPS_DIR" "$REPO_ROOT/triplets/ci" "$VCPKG_BINARY_CACHE"
 log "preparing Linux dependencies under $DEPS_DIR"
@@ -164,19 +165,15 @@ output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 
-cat > "$REPO_ROOT/triplets/ci/$VCPKG_TRIPLET.cmake" <<'EOF'
-set(VCPKG_TARGET_ARCHITECTURE x64)
-set(VCPKG_CRT_LINKAGE dynamic)
-set(VCPKG_LIBRARY_LINKAGE dynamic)
-set(VCPKG_CMAKE_SYSTEM_NAME Linux)
-set(VCPKG_BUILD_TYPE release)
-EOF
+triplet_file="$REPO_ROOT/triplets/ci/$VCPKG_TRIPLET.cmake"
+[[ -f "$triplet_file" ]] || fail "versioned Linux triplet not found: $triplet_file"
 
 manifest_dir="$REPO_ROOT/build/linux-vcpkg-manifest"
 mkdir -p "$manifest_dir"
 cp "$REPO_ROOT/build/linux-vcpkg.json" "$manifest_dir/vcpkg.json"
 VCPKG_MAX_CONCURRENCY="$BUILD_JOBS" "$VCPKG_ROOT/vcpkg" install \
     --triplet "$VCPKG_TRIPLET" \
+    --host-triplet "$VCPKG_TRIPLET" \
     --x-manifest-root="$manifest_dir" \
     --x-install-root="$VCPKG_INSTALL_ROOT" \
     --overlay-triplets="$REPO_ROOT/triplets/ci" \

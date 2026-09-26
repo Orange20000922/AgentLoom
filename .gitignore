@@ -6,6 +6,11 @@
 build/
 build-ide/
 triplets/
+!triplets/
+triplets/*
+!triplets/ci/
+triplets/ci/*
+!triplets/ci/x64-linux-release.cmake
 #vcpkg安装包和依赖
 vcpkg_installed/
 vcpkg/
@@ -13,6 +18,9 @@ deps/
 third_party/
 !third_party/
 third_party/*
+!third_party/hf_tokenizers_capi/
+!third_party/hf_tokenizers_capi/**
+third_party/hf_tokenizers_capi/target/
 !third_party/nlohmann/
 third_party/nlohmann/*
 !third_party/nlohmann/json.hpp
