@@ -69,7 +69,8 @@ public:
     void SetHttpRequestHandler(IHttpRequestHandler handler);
     void SetAccessController(HttpAccessController controller);
     void SetStaticFiles(StaticFileOptions options);
-    // Registers a WebSocket endpoint that receives streamed message fragments.
+    // Registers WebSocket endpoints that receive one complete logical message per callback.
+    // A message may retain multiple pooled fragments internally without coalescing copies.
     // For oversized input the handler receives a WebSocketMessage with !ok();
     // the connection is kept open unless a protocol/internal error occurs.
     void SetWebSocketHandler(std::string path, WebSocketMessageHandler handler);
