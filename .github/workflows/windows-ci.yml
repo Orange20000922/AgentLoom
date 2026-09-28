@@ -157,8 +157,26 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo build --locked --release
           # Windows C++ FFI smoke test
-          cl.exe /std:c++20 /EHsc /Iinclude tests/ffi_smoke.cpp target/release/hf_tokenizers_capi.lib userenv.lib ws2_32.lib bcrypt.lib advapi32.lib /Fe:target/ffi_smoke.exe
-          .\target\ffi_smoke.exe
+          $rustLibrary = @(
+            "target/release/hf_tokenizers_capi.lib",
+            "target/x86_64-pc-windows-msvc/release/hf_tokenizers_capi.lib"
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $rustLibrary) {
+            throw "Rust tokenizer static library was not produced"
+          }
+          & cl.exe /std:c++20 /EHsc /utf-8 /Iinclude `
+            tests/ffi_smoke.cpp `
+            $rustLibrary `
+            ws2_32.lib userenv.lib advapi32.lib bcrypt.lib ntdll.lib `
+            kernel32.lib ole32.lib oleaut32.lib uuid.lib synchronization.lib `
+            /Fe:target/ffi_smoke.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "C++ tokenizer FFI smoke build failed with exit code $LASTEXITCODE"
+          }
+          & .\target\ffi_smoke.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "C++ tokenizer FFI smoke test failed with exit code $LASTEXITCODE"
+          }
 
       - name: Bootstrap vcpkg
         shell: pwsh
