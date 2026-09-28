@@ -98,30 +98,45 @@ public:
         : options_(options) {}
 
     core::Status AppendFrame(WebSocketFrame frame) {
+        return AppendFragment(
+            frame.kind,
+            frame.final_fragment,
+            frame.compressed,
+            std::move(frame.payload));
+    }
+
+    // 接收层的 read_some 结果并不是独立业务消息；保留 SharedBuffer 所有权，
+    // 直到 final fragment 到达后再由 TakeMessage 一次性交给 Handler。
+    core::Status AppendFragment(
+        WebSocketMessageKind kind,
+        bool final_fragment,
+        bool compressed,
+        SharedBuffer fragment) {
         if (complete_) {
             return core::Status::Error(core::ErrorCode::InvalidArgument, "message is already complete");
         }
-        if (frame.size() > options_.max_frame_bytes) {
+        if (fragment.size() > options_.max_frame_bytes) {
             return core::Status::Error(core::ErrorCode::ResourceExhausted, "websocket frame is too large");
         }
-        if (started_ && frame.kind != kind_) {
+        if (started_ && kind != kind_) {
             return core::Status::Error(core::ErrorCode::InvalidArgument, "fragment kind changed");
         }
 
-        const auto next_total = total_bytes_ + frame.size();
-        if (next_total > options_.max_message_bytes) {
+        if (total_bytes_ > options_.max_message_bytes ||
+            fragment.size() > options_.max_message_bytes - total_bytes_) {
             return core::Status::Error(core::ErrorCode::ResourceExhausted, "websocket message is too large");
         }
+        const auto next_total = total_bytes_ + fragment.size();
 
         if (!started_) {
-            kind_ = frame.kind;
-            compressed_ = frame.compressed;
+            kind_ = kind;
+            compressed_ = compressed;
             started_ = true;
         }
 
         total_bytes_ = next_total;
-        complete_ = frame.final_fragment;
-        fragments_.push_back(std::move(frame.payload));
+        complete_ = final_fragment;
+        fragments_.push_back(std::move(fragment));
         return core::Status::Ok();
     }
 

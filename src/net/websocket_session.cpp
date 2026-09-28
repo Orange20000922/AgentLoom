@@ -71,7 +71,8 @@ WebSocketSession::WebSocketSession(tcp::socket socket,
       lease_(std::move(lease)),
       options_(std::move(options)),
       callbacks_(std::move(callbacks)),
-      outbound_queue_(MakeWebSocketOutboundQueue(options_.websocket)) {}
+      outbound_queue_(MakeWebSocketOutboundQueue(options_.websocket)),
+      inbound_message_assembler_(options_.websocket) {}
 
 std::size_t WebSocketSession::InitialReadCapacity() const noexcept {
     const auto configured = options_.read_tuning.initial_read_bytes;
@@ -261,6 +262,7 @@ void WebSocketSession::OnReadSome(beast::error_code ec, std::size_t bytes_transf
             current_message_bytes_ = 0;
             current_message_kind_ = WebSocketMessageKind::Binary;
             discarding_oversized_message_ = false;
+            inbound_message_assembler_.Reset();
         }
         DoReadSome();
         return;
@@ -286,18 +288,39 @@ void WebSocketSession::OnReadSome(beast::error_code ec, std::size_t bytes_transf
 
     current_message_bytes_ = next_message_bytes;
 
-    WebSocketMessage message;
-    message.kind = current_message_kind_;
-    message.final_fragment = final_fragment;
-    message.fragments.push_back(std::move(read_buffer_));
-    message.total_bytes = message.fragments.front().size();
-
-    if (message.final_fragment) {
-        current_message_bytes_ = 0;
-        current_message_kind_ = WebSocketMessageKind::Binary;
+    auto append_status = inbound_message_assembler_.AppendFragment(
+        current_message_kind_,
+        final_fragment,
+        false,
+        std::move(read_buffer_));
+    if (!append_status.ok()) {
+        DispatchReadError(append_status, next_message_bytes, final_fragment);
+        if (!final_fragment) {
+            discarding_oversized_message_ = true;
+        }
+        current_message_bytes_ = final_fragment ? 0 : next_message_bytes;
+        if (final_fragment) {
+            current_message_kind_ = WebSocketMessageKind::Binary;
+        }
+        DoReadSome();
+        return;
     }
 
-    DispatchMessage(std::move(message));
+    if (!final_fragment) {
+        DoReadSome();
+        return;
+    }
+
+    auto message_result = inbound_message_assembler_.TakeMessage();
+    current_message_bytes_ = 0;
+    current_message_kind_ = WebSocketMessageKind::Binary;
+    if (!message_result.ok()) {
+        DispatchReadError(message_result.status(), next_message_bytes, true);
+        DoReadSome();
+        return;
+    }
+
+    DispatchMessage(std::move(message_result).value());
     DoReadSome();
 }
 
@@ -386,6 +409,7 @@ void WebSocketSession::DispatchMessage(WebSocketMessage message) {
 }
 
 void WebSocketSession::DispatchReadError(core::Status status, std::size_t bytes_transferred, bool final_fragment) {
+    inbound_message_assembler_.Reset();
     WebSocketMessage message;
     message.kind = current_message_kind_;
     message.final_fragment = final_fragment;

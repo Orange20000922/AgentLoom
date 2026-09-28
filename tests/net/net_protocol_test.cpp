@@ -763,24 +763,26 @@ TEST(HttpServerRuntimeTest, TunesWebSocketReadCapacityByRouteAndObservedBytes) {
     auto stream_done_future = stream_done.get_future();
 
     server.SetWebSocketHandler("/message", [&](net::WebSocketSessionHandle&, net::WebSocketMessage message) {
-        ASSERT_EQ(message.fragments.size(), 1u);
+        EXPECT_TRUE(message.final_fragment);
+        ASSERT_GT(message.fragments.size(), 1u);
         {
             std::lock_guard lock(capacities_mutex);
-            message_capacities.push_back(message.fragments.front().capacity());
+            for (const auto& fragment : message.fragments) {
+                message_capacities.push_back(fragment.capacity());
+            }
         }
-        if (message.final_fragment) {
-            message_done.set_value();
-        }
+        message_done.set_value();
     });
     server.SetWebSocketStreamHandler("/stream", [&](std::shared_ptr<net::IWebSocketStreamRequest> request) {
-        ASSERT_EQ(request->message().fragments.size(), 1u);
+        EXPECT_TRUE(request->message().final_fragment);
+        ASSERT_GT(request->message().fragments.size(), 1u);
         {
             std::lock_guard lock(capacities_mutex);
-            stream_capacities.push_back(request->message().fragments.front().capacity());
+            for (const auto& fragment : request->message().fragments) {
+                stream_capacities.push_back(fragment.capacity());
+            }
         }
-        if (request->message().final_fragment) {
-            stream_done.set_value();
-        }
+        stream_done.set_value();
     });
 
     ASSERT_TRUE(server.Start().ok());
@@ -891,7 +893,7 @@ TEST(HttpServerRuntimeTest, ReleasesWebSocketSessionAfterPeerClose) {
     server.Stop();
 }
 
-TEST(HttpServerRuntimeTest, StreamsLargeWebSocketMessageAsFragments) {
+TEST(HttpServerRuntimeTest, AssemblesLargeWebSocketMessageBeforeHandler) {
     net::HttpServerOptions options;
     options.address = "127.0.0.1";
     options.port = 0;
@@ -904,27 +906,32 @@ TEST(HttpServerRuntimeTest, StreamsLargeWebSocketMessageAsFragments) {
     core::BucketMemoryPool response_pool;
     std::mutex fragments_mutex;
     std::vector<std::string> fragments;
-    std::vector<bool> final_flags;
     std::promise<void> final_seen;
     auto final_seen_future = final_seen.get_future();
-    std::atomic_bool final_recorded{false};
+    std::atomic_size_t handler_calls{0};
 
     server.SetWebSocketHandler("/ws", [&](net::WebSocketSessionHandle& session, net::WebSocketMessage message) {
+        handler_calls.fetch_add(1, std::memory_order_relaxed);
         EXPECT_EQ(message.kind, net::WebSocketMessageKind::Text);
-        EXPECT_EQ(message.fragments.size(), 1u);
-        if (!message.fragments.empty()) {
+        EXPECT_TRUE(message.final_fragment);
+        EXPECT_EQ(message.total_bytes, 12u);
+        ASSERT_GT(message.fragments.size(), 1u);
+        {
             std::lock_guard lock(fragments_mutex);
-            fragments.emplace_back(message.fragments[0].view());
-            final_flags.push_back(message.final_fragment);
+            for (const auto& fragment : message.fragments) {
+                fragments.emplace_back(fragment.view());
+            }
         }
 
-        if (message.final_fragment && !final_recorded.exchange(true)) {
-            auto payload = net::SharedBuffer::Copy(response_pool, "done");
-            ASSERT_TRUE(payload.ok()) << payload.status().message();
-            auto status = session.Send(net::WebSocketFrame{net::WebSocketMessageKind::Text, true, false, std::move(payload).value()});
-            EXPECT_TRUE(status.ok()) << status.message();
-            final_seen.set_value();
-        }
+        auto response = net::SharedBuffer::Copy(response_pool, "done");
+        ASSERT_TRUE(response.ok()) << response.status().message();
+        auto status = session.Send(net::WebSocketFrame{
+            net::WebSocketMessageKind::Text,
+            true,
+            false,
+            std::move(response).value()});
+        EXPECT_TRUE(status.ok()) << status.message();
+        final_seen.set_value();
     });
 
     auto start_status = server.Start();
@@ -951,20 +958,160 @@ TEST(HttpServerRuntimeTest, StreamsLargeWebSocketMessageAsFragments) {
     {
         std::lock_guard lock(fragments_mutex);
         ASSERT_GT(fragments.size(), 1u);
-        ASSERT_EQ(final_flags.size(), fragments.size());
         std::string joined;
         for (const auto& fragment : fragments) {
             joined += fragment;
         }
         EXPECT_EQ(joined, payload);
-        for (std::size_t i = 0; i + 1 < final_flags.size(); ++i) {
-            EXPECT_FALSE(final_flags[i]);
+    }
+    EXPECT_EQ(handler_calls.load(std::memory_order_relaxed), 1u);
+
+    beast::error_code ec;
+    ws.close(beast::websocket::close_code::normal, ec);
+    server.Stop();
+}
+
+TEST(HttpServerRuntimeTest, KeepsBackToBackWebSocketMessagesSeparated) {
+    net::HttpServerOptions options;
+    options.address = "127.0.0.1";
+    options.port = 0;
+    options.io_threads = 1;
+    options.websocket.max_frame_bytes = 4;
+    options.websocket.max_message_bytes = 64;
+    options.websocket_read_buffer_limit = 64;
+
+    net::HttpServer server(options);
+    std::mutex messages_mutex;
+    std::vector<std::string> messages;
+
+    server.SetWebSocketHandler("/ws", [&](net::WebSocketSessionHandle& session, net::WebSocketMessage message) {
+        EXPECT_TRUE(message.final_fragment);
+        std::string joined;
+        for (const auto& fragment : message.fragments) {
+            joined.append(fragment.view());
         }
-        EXPECT_TRUE(final_flags.back());
+        {
+            std::lock_guard lock(messages_mutex);
+            messages.push_back(joined);
+        }
+
+        core::BucketMemoryPool response_pool;
+        auto response = net::SharedBuffer::Copy(response_pool, joined);
+        ASSERT_TRUE(response.ok()) << response.status().message();
+        auto status = session.Send(net::WebSocketFrame{
+            net::WebSocketMessageKind::Text,
+            true,
+            false,
+            std::move(response).value()});
+        ASSERT_TRUE(status.ok()) << status.message();
+    });
+
+    ASSERT_TRUE(server.Start().ok());
+
+    asio::io_context io;
+    tcp::resolver resolver(io);
+    beast::websocket::stream<tcp::socket> ws(io);
+    asio::connect(ws.next_layer(), resolver.resolve("127.0.0.1", std::to_string(server.port())));
+    ws.handshake("127.0.0.1", "/ws");
+    ws.text(true);
+
+    for (const std::string payload : {"first-message", "second-message"}) {
+        ws.write(asio::buffer(payload));
+        beast::flat_buffer buffer;
+        ws.read(buffer);
+        EXPECT_EQ(beast::buffers_to_string(buffer.data()), payload);
+    }
+
+    {
+        std::lock_guard lock(messages_mutex);
+        ASSERT_EQ(messages.size(), 2u);
+        EXPECT_EQ(messages[0], "first-message");
+        EXPECT_EQ(messages[1], "second-message");
     }
 
     beast::error_code ec;
     ws.close(beast::websocket::close_code::normal, ec);
+    server.Stop();
+}
+
+TEST(HttpServerRuntimeTest, IsolatesCompleteMessagesAcrossConcurrentConnections) {
+    constexpr std::size_t kClientCount = 8;
+
+    net::HttpServerOptions options;
+    options.address = "127.0.0.1";
+    options.port = 0;
+    options.io_threads = 2;
+    options.websocket.max_frame_bytes = 8;
+    options.websocket.max_message_bytes = 1024;
+    options.websocket_read_buffer_limit = 1024;
+
+    net::HttpServer server(options);
+    std::mutex messages_mutex;
+    std::vector<std::string> messages;
+
+    server.SetWebSocketHandler("/ws", [&](net::WebSocketSessionHandle& session, net::WebSocketMessage message) {
+        EXPECT_TRUE(message.final_fragment);
+        std::string joined;
+        for (const auto& fragment : message.fragments) {
+            joined.append(fragment.view());
+        }
+        {
+            std::lock_guard lock(messages_mutex);
+            messages.push_back(joined);
+        }
+
+        core::BucketMemoryPool response_pool;
+        auto response = net::SharedBuffer::Copy(response_pool, "ack");
+        ASSERT_TRUE(response.ok()) << response.status().message();
+        auto status = session.Send(net::WebSocketFrame{
+            net::WebSocketMessageKind::Text,
+            true,
+            false,
+            std::move(response).value()});
+        ASSERT_TRUE(status.ok()) << status.message();
+    });
+
+    ASSERT_TRUE(server.Start().ok());
+
+    std::vector<std::jthread> clients;
+    clients.reserve(kClientCount);
+    for (std::size_t index = 0; index < kClientCount; ++index) {
+        clients.emplace_back([&, index] {
+            asio::io_context io;
+            tcp::resolver resolver(io);
+            beast::websocket::stream<tcp::socket> ws(io);
+            asio::connect(ws.next_layer(), resolver.resolve("127.0.0.1", std::to_string(server.port())));
+            ws.handshake("127.0.0.1", "/ws");
+            ws.text(true);
+
+            const auto payload = "connection-" + std::to_string(index) + ":" + std::string(256, static_cast<char>('a' + index));
+            ws.write(asio::buffer(payload));
+            beast::flat_buffer buffer;
+            ws.read(buffer);
+            EXPECT_EQ(beast::buffers_to_string(buffer.data()), "ack");
+
+            beast::error_code ec;
+            ws.close(beast::websocket::close_code::normal, ec);
+        });
+    }
+    clients.clear();
+
+    std::vector<std::string> expected;
+    expected.reserve(kClientCount);
+    for (std::size_t index = 0; index < kClientCount; ++index) {
+        expected.push_back(
+            "connection-" + std::to_string(index) + ":" +
+            std::string(256, static_cast<char>('a' + index)));
+    }
+
+    {
+        std::lock_guard lock(messages_mutex);
+        ASSERT_EQ(messages.size(), kClientCount);
+        std::sort(messages.begin(), messages.end());
+        std::sort(expected.begin(), expected.end());
+        EXPECT_EQ(messages, expected);
+    }
+
     server.Stop();
 }
 
@@ -997,12 +1144,8 @@ TEST(HttpServerRuntimeTest, ReportsOversizedWebSocketMessageWithoutClosingConnec
             return;
         }
 
+        EXPECT_TRUE(message.final_fragment);
         ASSERT_EQ(message.fragments.size(), 1u);
-        if (message.fragments.front().view() != "ok") {
-            EXPECT_FALSE(message.final_fragment);
-            return;
-        }
-
         EXPECT_EQ(message.fragments.front().view(), "ok");
         auto payload = net::SharedBuffer::Copy(response_pool, "after-error");
         ASSERT_TRUE(payload.ok()) << payload.status().message();
@@ -1047,7 +1190,7 @@ TEST(HttpServerRuntimeTest, ReportsOversizedWebSocketMessageWithoutClosingConnec
     EXPECT_EQ(beast::buffers_to_string(buffer.data()), "after-error");
 
     EXPECT_EQ(next_message_seen_future.wait_for(2s), std::future_status::ready);
-    EXPECT_GE(handler_calls.load(std::memory_order_relaxed), 2u);
+    EXPECT_EQ(handler_calls.load(std::memory_order_relaxed), 2u);
 
     ws.close(beast::websocket::close_code::normal, ec);
     server.Stop();
@@ -1100,6 +1243,39 @@ TEST(WebSocketTypesTest, AssemblesFragmentedMessageWithoutCoalescingBuffers) {
     EXPECT_EQ(message.total_bytes, 11u);
     EXPECT_EQ(message.fragments[0].view(), "hello ");
     EXPECT_EQ(message.fragments[1].view(), "world");
+}
+
+TEST(WebSocketTypesTest, AssemblesInboundReadFragmentsWithoutCopying) {
+    core::BucketMemoryPool pool;
+    net::WebSocketMessageAssembler assembler({64, 1024});
+
+    auto first_payload = net::SharedBuffer::Copy(pool, "read ");
+    ASSERT_TRUE(first_payload.ok()) << first_payload.status().message();
+    auto second_payload = net::SharedBuffer::Copy(pool, "complete");
+    ASSERT_TRUE(second_payload.ok()) << second_payload.status().message();
+
+    auto first_status = assembler.AppendFragment(
+        net::WebSocketMessageKind::Text,
+        false,
+        false,
+        std::move(first_payload).value());
+    ASSERT_TRUE(first_status.ok()) << first_status.message();
+    EXPECT_FALSE(assembler.complete());
+
+    auto second_status = assembler.AppendFragment(
+        net::WebSocketMessageKind::Text,
+        true,
+        false,
+        std::move(second_payload).value());
+    ASSERT_TRUE(second_status.ok()) << second_status.message();
+
+    auto message_result = assembler.TakeMessage();
+    ASSERT_TRUE(message_result.ok()) << message_result.status().message();
+    auto message = std::move(message_result).value();
+    ASSERT_EQ(message.fragments.size(), 2u);
+    EXPECT_EQ(message.total_bytes, 13u);
+    EXPECT_EQ(message.fragments[0].view(), "read ");
+    EXPECT_EQ(message.fragments[1].view(), "complete");
 }
 
 TEST(WebSocketTypesTest, RejectsMessagesAboveConfiguredLimit) {

@@ -75,6 +75,7 @@ private:
     WebSocketSessionOptions options_;
     WebSocketSessionCallbacks callbacks_;
     WebSocketOutboundQueue outbound_queue_;
+    WebSocketMessageAssembler inbound_message_assembler_;
     core::BucketMemoryPool memory_pool_;
     SharedBuffer read_buffer_;
     std::size_t read_capacity_ = 0;
