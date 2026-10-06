@@ -8,6 +8,7 @@
 - [Skill Session Protocol](SKILL_SESSION_PROTOCOL.md)
 - [Skill Tool-Calling Runtime (2026-09)](SKILL_TOOL_CALLING_RUNTIME_2026_09.md)
 - [Streaming Architecture](STREAMING_ARCHITECTURE.md)
+- [Runtime Observability Contract](RUNTIME_OBSERVABILITY_CONTRACT.md)
 - [Multimodal Perception Layers](MULTIMODAL_PERCEPTION_LAYERS.md)
 
 ## 当前设计
