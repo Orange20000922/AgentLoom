@@ -1098,6 +1098,9 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
         completion = std::move(llm_result).value();
         // 同步阶段最多执行一轮工具调用；异步 continuation 保持后续扩展点。
         if (!completion.tool_calls.empty() && skill_tool_coordinator_) {
+            prepared.prompt_tokens += completion.prompt_tokens;
+            prepared.completion_tokens += completion.completion_tokens;
+            prepared.total_tokens += completion.total_tokens;
             llm::ChatMessage assistant;
             assistant.role = llm::ChatRole::Assistant;
             assistant.tool_calls = completion.tool_calls;
@@ -1254,6 +1257,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                 auto llm_completion = std::move(*result_holder).value();
                 if (!llm_completion.tool_calls.empty() &&
                     skill_tool_coordinator_ && prepared_value.tool_round == 0) {
+                    prepared_value.prompt_tokens += llm_completion.prompt_tokens;
+                    prepared_value.completion_tokens += llm_completion.completion_tokens;
+                    prepared_value.total_tokens += llm_completion.total_tokens;
                     llm::ChatMessage assistant;
                     assistant.role = llm::ChatRole::Assistant;
                     assistant.tool_calls = llm_completion.tool_calls;
@@ -1903,6 +1909,9 @@ PersonaRuntime::FinalizeLlmCompletionAfterEmotion(
     response.answer_cache = std::move(prepared.answer_cache);
     response.latency = prepared.latency;
     response.messages = std::move(prepared.messages);
+    response.prompt_tokens = prepared.prompt_tokens + completion.prompt_tokens;
+    response.completion_tokens = prepared.completion_tokens + completion.completion_tokens;
+    response.total_tokens = prepared.total_tokens + completion.total_tokens;
     response.latency.callback_to_response = Since(prepared.started_at) - response.latency.total;
     CompletedChat completed;
     completed.response = std::move(response);

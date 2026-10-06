@@ -2,6 +2,7 @@
 #include "gateway_session_affinity_scheduler.h"
 #include "runtime_maintenance_service.h"
 #include "skill_session_manager.h"
+#include "mock_answer_cache_provider.h"
 
 #include <gtest/gtest.h>
 
@@ -178,6 +179,8 @@ public:
         } else {
             response.content = tool_round_trip ? "工具结果后的最终回复" : "这是回复";
         }
+        response.prompt_tokens = 30;
+        response.completion_tokens = 12;
         response.total_tokens = 42;
         return response;
     }
@@ -340,6 +343,9 @@ public:
         ChatCompletionResponse response;
         response.content = std::move(content);
         response.model = "async-test-model";
+        response.prompt_tokens = 11;
+        response.completion_tokens = 7;
+        response.total_tokens = 18;
         pending->Finish(std::move(response));
     }
 
@@ -355,6 +361,9 @@ public:
         }
         ChatCompletionResponse response;
         response.model = "async-test-model";
+        response.prompt_tokens = 23;
+        response.completion_tokens = 5;
+        response.total_tokens = 28;
         response.tool_calls.push_back({std::move(id), std::move(name), std::move(arguments)});
         pending->Finish(std::move(response));
     }
@@ -602,6 +611,9 @@ TEST(PersonaRuntimeTest, AsyncLlmReleasesWorkerAndPreservesPerSessionOrder) {
     ASSERT_TRUE(other_result.ok()) << other_result.status().message();
     EXPECT_EQ(other_result.value().response, "b-response");
     EXPECT_EQ(other_result.value().turn_index, 1u);
+    EXPECT_EQ(other_result.value().prompt_tokens, 11);
+    EXPECT_EQ(other_result.value().completion_tokens, 7);
+    EXPECT_EQ(other_result.value().total_tokens, 18);
 
     async_llm->Complete(0, "a-first-response");
     ASSERT_EQ(first_done_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
@@ -796,6 +808,9 @@ TEST(PersonaRuntimeTest, AsyncSkillExecutionReleasesWorkerAndResubmitsFollowUp) 
     ASSERT_TRUE(first_result.ok()) << first_result.status().message();
     EXPECT_EQ(first_result.value().response, "async skill follow-up response");
     EXPECT_EQ(coordinator->execution_count(), 1);
+    EXPECT_EQ(first_result.value().prompt_tokens, 34);
+    EXPECT_EQ(first_result.value().completion_tokens, 12);
+    EXPECT_EQ(first_result.value().total_tokens, 46);
 
     runtime.Shutdown();
     sessions.Shutdown();
@@ -985,6 +1000,58 @@ TEST(PersonaRuntimeTest, ShutdownWaitsForAcceptedAsyncMemoryContinuation) {
     compute.Shutdown(true);
 }
 
+// 同步和异步都走实际 Session/Persona 完成链路，缓存直返不得重复计入历史生成用量。
+class PersonaAnswerCacheUsageTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(PersonaAnswerCacheUsageTest, CachedAnswerReturnsZeroUsageWithoutCallingLlm) {
+    core::ThreadPool compute({1, 32, "cache-usage-compute"});
+    // 异步 Session 要求按 key 串行直到完成，复用现有 affinity 调度器。
+    core::ThreadPool io({1, 32, "cache-usage-io",
+                         std::make_shared<GatewaySessionAffinityScheduler>()});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    SessionManager sessions(compute, io);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto memory = std::make_shared<SemanticMemoryContextProvider>(std::make_shared<FakeSemanticCache>());
+    auto llm = std::make_shared<FakeLlmClient>();
+    auto async_llm = std::make_shared<ManualAsyncLlmClient>();
+    auto answer_cache = std::make_shared<agent::test::FixedAnswerCacheProvider>();
+    PersonaRuntime runtime(
+        sessions, memory, std::make_shared<NeutralEmotionAnalyzer>(), llm,
+        PersonaRuntimeOptions{.default_model = "test-model"}, answer_cache, nullptr, nullptr,
+        core::LoggerAdapter::ForModule("test"), nullptr,
+        GetParam() ? async_llm : nullptr);
+
+    std::promise<core::Result<ChatResponse>> promise;
+    auto future = promise.get_future();
+    ChatRequest request;
+    request.session_id = "session-runtime";
+    request.user_input = "cached question";
+    const auto submitted = runtime.SubmitChat(std::move(request), [&promise](auto result) {
+        promise.set_value(std::move(result));
+    });
+    ASSERT_TRUE(submitted.ok()) << submitted.message();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_TRUE(result.value().answer_cache.hit);
+    EXPECT_EQ(result.value().response, "cached answer");
+    EXPECT_EQ(result.value().prompt_tokens, 0);
+    EXPECT_EQ(result.value().completion_tokens, 0);
+    EXPECT_EQ(result.value().total_tokens, 0);
+    EXPECT_EQ(async_llm->Count(), 0u);
+    {
+        std::lock_guard lock(llm->mutex_);
+        EXPECT_TRUE(llm->last_request.messages.empty());
+    }
+    runtime.Shutdown();
+    sessions.Shutdown();
+    io.Shutdown(true);
+    compute.Shutdown(true);
+}
+
+INSTANTIATE_TEST_SUITE_P(SyncAndAsync, PersonaAnswerCacheUsageTest, ::testing::Bool());
+
 TEST(PersonaRuntimeTest, BuildsMessagesFromL0AndLastTenRawTurns) {
     core::ThreadPool compute({1, 32, "runtime-compute"});
     core::ThreadPool io({1, 32, "runtime-io"});
@@ -1038,6 +1105,9 @@ TEST(PersonaRuntimeTest, BuildsMessagesFromL0AndLastTenRawTurns) {
     EXPECT_EQ(result.value().messages[20].content, "a11");
     EXPECT_EQ(result.value().messages[21].content, "当前问题");
     EXPECT_TRUE(result.value().l0_hit);
+    EXPECT_EQ(result.value().prompt_tokens, 30);
+    EXPECT_EQ(result.value().completion_tokens, 12);
+    EXPECT_EQ(result.value().total_tokens, 42);
 
     {
         std::lock_guard lock(llm->mutex_);
@@ -1584,6 +1654,9 @@ TEST(PersonaRuntimeTest, CompletesSynchronousToolCallFollowUpRoundTrip) {
     ASSERT_TRUE(result.ok()) << result.status().message();
     EXPECT_EQ(result.value().response, "工具结果后的最终回复");
     EXPECT_EQ(coordinator->execute_count, 1);
+    EXPECT_EQ(result.value().prompt_tokens, 60);
+    EXPECT_EQ(result.value().completion_tokens, 24);
+    EXPECT_EQ(result.value().total_tokens, 84);
     {
         std::lock_guard lock(llm->mutex_);
         EXPECT_EQ(llm->call_count, 2);
