@@ -156,6 +156,7 @@ if(BERT_BUILD_TESTS)
 
     add_executable(net_tests
         tests/net/net_protocol_test.cpp
+        tests/net/websocket_logging_test.cpp
     )
 
     target_link_libraries(net_tests PRIVATE

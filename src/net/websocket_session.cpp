@@ -11,6 +11,20 @@ WebSocketMessageKind WebSocketKindFromStream(const websocket::stream<beast::tcp_
     return stream.got_text() ? WebSocketMessageKind::Text : WebSocketMessageKind::Binary;
 }
 
+std::string_view CloseReasonName(ConnectionCloseReason reason) noexcept {
+    switch (reason) {
+    case ConnectionCloseReason::RemoteClosed: return "remote_closed";
+    case ConnectionCloseReason::IdleTimeout: return "idle_timeout";
+    case ConnectionCloseReason::ResponseTimeout: return "response_timeout";
+    case ConnectionCloseReason::AccessDenied: return "access_denied";
+    case ConnectionCloseReason::BackpressureLimit: return "backpressure_limit";
+    case ConnectionCloseReason::ProtocolError: return "protocol_error";
+    case ConnectionCloseReason::ServerShutdown: return "server_shutdown";
+    case ConnectionCloseReason::InternalError: return "internal_error";
+    }
+    return "unknown";
+}
+
 core::Status MessageTooLargeStatus(std::string message = "websocket message is too large") {
     return core::Status::Error(core::ErrorCode::ResourceExhausted, std::move(message));
 }
@@ -73,6 +87,46 @@ WebSocketSession::WebSocketSession(tcp::socket socket,
       callbacks_(std::move(callbacks)),
       outbound_queue_(MakeWebSocketOutboundQueue(options_.websocket)),
       inbound_message_assembler_(options_.websocket) {}
+
+WebSocketSession::~WebSocketSession() {
+    // Stop 停止 IO 后再释放 Session；没有读回调时也补齐一次关闭摘要。
+    // 析构只记录，不调用用户回调，不改变原有 drain 和连接回收顺序。
+    if (!close_notified_.exchange(true, std::memory_order_acq_rel)) {
+        ConnectionCloseInfo info;
+        info.reason = ConnectionCloseReason::ServerShutdown;
+        LogClosed(info);
+    }
+}
+
+const ConnectionContext& WebSocketSession::connection() const noexcept {
+    return lease_.context();
+}
+
+void WebSocketSession::LogClosed(const ConnectionCloseInfo& info) const noexcept {
+    const auto& context = connection();
+    const auto started = accepted_ ? accepted_at_ : context.connected_at;
+    const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    const auto level = info.reason == ConnectionCloseReason::InternalError
+        ? spdlog::level::err
+        : (info.reason == ConnectionCloseReason::RemoteClosed ||
+           info.reason == ConnectionCloseReason::IdleTimeout ||
+           info.reason == ConnectionCloseReason::ServerShutdown)
+            ? spdlog::level::info : spdlog::level::warn;
+    // 仅记录计数、固定原因和错误码；对端关闭文本可能包含用户输入，不写 detail/target/凭据。
+    try {
+        if (auto* logger = options_.logger.get()) {
+            logger->log(level,
+                "event=ws.closed connection_id={} remote_address={} accepted={} duration_ms={}"
+                " messages={} bytes={} reason={} status_code={}",
+                context.connection_id, context.remote_address, accepted_, duration,
+                received_messages_, received_bytes_, CloseReasonName(info.reason),
+                static_cast<int>(info.status.code()));
+        }
+    } catch (...) {
+        // 诊断输出失败不能中断网络关闭或析构；连接状态仍按原协议回收。
+    }
+}
 
 std::size_t WebSocketSession::InitialReadCapacity() const noexcept {
     const auto configured = options_.read_tuning.initial_read_bytes;
@@ -175,6 +229,14 @@ void WebSocketSession::OnAccept(beast::error_code ec) {
                      ec.message()});
         return;
     }
+    accepted_ = true;
+    accepted_at_ = std::chrono::steady_clock::now();
+    try {
+        options_.logger.info("event=ws.opened connection_id={} remote_address={}",
+                             connection_id(), connection().remote_address);
+    } catch (...) {
+        // 日志失败不影响已经完成的 WS 握手。
+    }
     if (callbacks_.accept_handler) {
         callbacks_.accept_handler(*this);
     }
@@ -243,6 +305,8 @@ void WebSocketSession::OnReadSome(beast::error_code ec, std::size_t bytes_transf
     }
 
     lease_.Touch();
+    received_bytes_ += bytes_transferred;
+    if (stream_.is_message_done()) ++received_messages_;
 
     const auto requested_capacity = read_buffer_.capacity();
     auto resize_status = read_buffer_.resize(bytes_transferred);
@@ -387,6 +451,7 @@ void WebSocketSession::NotifyClose(const ConnectionCloseInfo& close_info) {
     auto enriched = close_info;
     enriched.connection_id = lease_.context().connection_id;
     enriched.target = std::string(request_.target());
+    LogClosed(enriched);
     lease_.Close(enriched);
     if (callbacks_.close_handler) {
         callbacks_.close_handler(enriched);

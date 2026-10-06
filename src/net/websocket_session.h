@@ -7,6 +7,7 @@
 #include "websocket_types.h"
 
 #include "memory_pool.h"
+#include "logger_adapter.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -26,6 +27,7 @@ struct WebSocketSessionOptions {
     std::size_t read_buffer_limit = 16 * 1024 * 1024;
     WebSocketOptions websocket;
     WebSocketReadTuning read_tuning;
+    core::LoggerAdapter logger = core::LoggerAdapter::ForModule("net");
 };
 
 struct WebSocketSessionCallbacks {
@@ -44,6 +46,8 @@ public:
                      WebSocketSessionOptions options,
                      WebSocketSessionCallbacks callbacks);
 
+    ~WebSocketSession();
+    const ConnectionContext& connection() const noexcept override;
     void Run();
 
     core::Status Send(WebSocketFrame frame) override;
@@ -59,6 +63,7 @@ private:
     void OnWrite(beast::error_code ec, std::size_t);
     void DoClose(ConnectionCloseInfo close_info);
     void NotifyClose(const ConnectionCloseInfo& close_info);
+    void LogClosed(const ConnectionCloseInfo& close_info) const noexcept;
     void OnControl(websocket::frame_type type, beast::string_view payload);
     void DispatchMessage(WebSocketMessage message);
     void DispatchReadError(core::Status status, std::size_t bytes_transferred, bool final_fragment);
@@ -87,6 +92,10 @@ private:
     bool closing_ = false;
     bool discarding_oversized_message_ = false;
     std::atomic<bool> close_notified_{false};
+    bool accepted_ = false;
+    std::uint64_t received_messages_ = 0;
+    std::uint64_t received_bytes_ = 0;
+    std::chrono::steady_clock::time_point accepted_at_;
 };
 
 } // namespace net
