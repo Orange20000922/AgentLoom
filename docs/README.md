@@ -8,6 +8,7 @@
 |------|------|
 | 当前规范 | 与当前源码边界一致，修改相关实现时应同步更新 |
 | 当前设计 | 已确定方向，部分生产组装或验收仍在进行 |
+| 讨论稿 | 用于方案评审，接口和实施范围尚未冻结，不代表已实现 |
 | 实现参考 | 描述一个具体模块、实验或部署路径，使用前应结合源码核对 |
 | 实验记录 | 有日期、环境和输入边界的可复现实验，不自动升级为生产承诺 |
 | 历史记录 | 保存早期方案、迁移过程或商业化讨论，不作为当前实现承诺 |
@@ -46,6 +47,7 @@
 
 | 文档 | 状态 | 内容 |
 |------|------|------|
+| [LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md](architecture/LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md) | 讨论稿 | 协议多态、对话 streaming、逐模块迁移及上游状态边界，尚未冻结或实施 |
 | [CONFIG_SYSTEM.md](runtime/CONFIG_SYSTEM.md) | 当前规范 | JSON section、CLI override 和配置扩展方式 |
 | [FRONTEND_BACKEND_API_PROTOCOL.md](gateway/FRONTEND_BACKEND_API_PROTOCOL.md) | 当前规范 | HTTP、WebSocket、认证、文档和 Skill API |
 | [GATEWAY_FRONTEND_SESSION_ALIGNMENT.md](gateway/GATEWAY_FRONTEND_SESSION_ALIGNMENT.md) | 当前设计 | Gateway、前端和 session 生命周期对齐 |

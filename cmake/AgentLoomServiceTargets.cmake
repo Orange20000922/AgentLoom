@@ -378,6 +378,7 @@ if(BERT_BUILD_TESTS)
 
     target_link_libraries(persona_runtime_tests PRIVATE
         agent_agent_runtime
+        agent_persona_interaction
         agent_gateway_foundation
         GTest::gtest_main
     )
@@ -389,6 +390,7 @@ if(BERT_BUILD_TESTS)
             tests/service/session_manager_test.cpp
             tests/service/gateway_foundation_test.cpp
             tests/service/persona_gateway_service_test.cpp
+            tests/service/persona_gateway_tool_calling_test.cpp
         )
         target_link_libraries(gateway_service_tests PRIVATE
             agent_service

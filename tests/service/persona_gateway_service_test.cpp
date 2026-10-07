@@ -315,6 +315,23 @@ TEST(PersonaInteractionTest, EnsuresSessionAndEnforcesTrustedOwner) {
     EXPECT_EQ(fixture.sessions.SessionCount(), 0u);
 }
 
+TEST(PersonaInteractionTest, CancelsActiveTurnAfterValidatingSessionOwner) {
+    GatewayFixture fixture;
+    PersonaInteraction interaction(fixture.sessions, fixture.runtime);
+    auto create = MakeCreateRequest();
+    agent::service::persona::CreateSessionRequest session;
+    session.session_id = create.session_id;
+    session.user_uuid = create.user_uuid;
+    session.persona_id = create.persona_id;
+    session.personality = create.personality;
+    ASSERT_TRUE(interaction.CreateSession(std::move(session)).ok());
+
+    auto wrong_owner = interaction.CancelTurn({create.session_id, "trace-denied", "another-user"});
+    EXPECT_EQ(wrong_owner.code(), core::ErrorCode::PermissionDenied);
+    auto missing_turn = interaction.CancelTurn({create.session_id, "trace-missing", create.user_uuid});
+    EXPECT_EQ(missing_turn.code(), core::ErrorCode::NotFound);
+}
+
 PersonaMetadataGatewayRequest MakePersonaMetadataRequest(std::string user_uuid = "user-gateway",
                                                          std::string persona_id = "dazhi",
                                                          std::string description = "stored persona") {

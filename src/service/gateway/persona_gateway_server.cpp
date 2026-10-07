@@ -14,6 +14,26 @@ namespace agent::service::gateway {
 
 namespace {
 
+PersonaGatewayServerDependencies ResolveSkillToolCallingDependencies(
+    PersonaGatewayServerDependencies dependencies) {
+    // 共享已装配的 Registry 和 Skill Session，避免工具调用与 HTTP Skill 生命周期分裂。
+    if (!dependencies.skill_tool_coordinator && dependencies.skill_registry &&
+        dependencies.skill_session_manager) {
+        if (!dependencies.skill_executor_factory) {
+            dependencies.skill_executor_factory =
+                std::make_shared<agent::skill::InMemorySkillExecutorFactory>();
+        }
+        auto invocation = std::make_shared<agent::skill::SkillInvocationService>(
+            dependencies.skill_registry,
+            dependencies.skill_executor_factory,
+            dependencies.skill_session_manager);
+        dependencies.skill_tool_coordinator =
+            std::make_shared<agent::skill::SkillToolCallCoordinator>(
+                dependencies.skill_registry, std::move(invocation));
+    }
+    return dependencies;
+}
+
 core::ThreadPoolOptions WithDefaultPoolName(core::ThreadPoolOptions options, std::string name) {
     if (options.name.empty() || options.name == "core-thread-pool") {
         options.name = std::move(name);
@@ -147,7 +167,7 @@ PersonaGatewayServer::PersonaGatewayServer(PersonaGatewayServerOptions options,
                                            PersonaGatewayServerDependencies dependencies,
                                            core::LoggerAdapter logger)
     : options_(std::move(options)),
-      dependencies_(std::move(dependencies)),
+      dependencies_(ResolveSkillToolCallingDependencies(std::move(dependencies))),
       logger_(std::move(logger)),
       compute_pool_(ResolvePoolOptions(
           options_.compute_pool,
@@ -171,7 +191,7 @@ PersonaGatewayServer::PersonaGatewayServer(PersonaGatewayServerOptions options,
                nullptr,
                dependencies_.async_llm_client,
                &llm_pool_,
-               nullptr,
+               dependencies_.skill_tool_coordinator,
                dependencies_.stateful_skill_router),
       classroom_scheduler_({}, core::LoggerAdapter::ForModule("classroom")),
       gateway_metadata_pool_(MakeGatewayMetadataPool(options_.auth)),
@@ -556,6 +576,10 @@ core::Status PersonaGatewayServer::ValidateDependencies() const {
     }
     if (!dependencies_.llm_client) {
         return core::Status::Error(core::ErrorCode::FailedPrecondition, "llm client is required");
+    }
+    if (dependencies_.skill_executor_factory && !dependencies_.skill_tool_coordinator) {
+        return core::Status::Error(core::ErrorCode::FailedPrecondition,
+                                  "skill executor factory requires a registry and session manager");
     }
     return core::Status::Ok();
 }

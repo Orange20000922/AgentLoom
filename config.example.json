@@ -1,127 +1,279 @@
 {
-  "_comment": "Unified section reference. Copy the process-specific example under config/ for deployment and keep local model paths or secrets in an ignored config.",
-  "models": {
-    "llm": "models/llama-model.gguf",
-    "mmproj": "models/mmproj.gguf",
-    "bert": "models/bert-model.onnx",
-    "vit": "models/vit-model.onnx",
-    "n_gpu_layers": -1,
-    "runner_pool_size": 1,
-    "llama_threads": 8,
-    "mmproj_threads": 8,
-    "provider": "auto",
-    "cuda_device": 0
+  "_comment": "Production-style config for agent_gateway_server. Paths are resolved relative to this file.",
+  "logging": {
+    "log_dir": "logs/agent_gateway",
+    "logger_name": "agent_gateway_server",
+    "file_name": "agent_gateway_server.log",
+    "enable_console": true,
+    "use_daily_rotation": true,
+    "max_file_size_bytes": 10485760,
+    "max_files": 7
   },
-  "http": {
-    "address": "0.0.0.0",
-    "port": 8080,
-    "io_threads": 4,
-    "request_timeout_seconds": 30,
-    "websocket_idle_timeout_seconds": 300,
-    "request_body_limit_mb": 16,
-    "websocket_read_buffer_limit_mb": 16
+  "persona_gateway": {
+    "address": "127.0.0.1",
+    "port": 18080,
+    "http_io_threads": 2,
+    "websocket_path": "/ws/session",
+    "session_idle_timeout_minutes": 15,
+    "session_max_recent_turns": 20,
+    "session_max_active_sessions": 1024,
+    "runtime_recent_raw_turns": 10,
+    "runtime_default_model": "deepseek-chat",
+    "compute_pool": {
+      "worker_count": 4,
+      "queue_capacity": 512,
+      "scheduler": "session_affinity",
+      "max_active_keys": 1024,
+      "max_outstanding_per_key": 8,
+      "max_outstanding_per_fairness_key": 32,
+      "max_outstanding_per_tenant": 256
+    },
+    "io_pool": {
+      "worker_count": 8,
+      "queue_capacity": 1024,
+      "scheduler": "session_affinity",
+      "max_active_keys": 1024,
+      "max_outstanding_per_key": 16,
+      "max_outstanding_per_fairness_key": 64,
+      "max_outstanding_per_tenant": 512
+    },
+    "llm_pool": {
+      "worker_count": 8,
+      "queue_capacity": 1024,
+      "scheduler": "session_affinity",
+      "max_active_keys": 1024,
+      "max_outstanding_per_key": 16,
+      "max_outstanding_per_fairness_key": 64,
+      "max_outstanding_per_tenant": 512
+    },
+    "request_filter": {
+      "enabled": true,
+      "reject_control_chars": true,
+      "reject_suspicious_patterns": true
+    },
+    "static_files": {
+      "enabled": true,
+      "root": "dist",
+      "index_file": "index.html",
+      "spa_fallback": true
+    }
+  },
+  "gateway_auth": {
+    "enabled": true,
+    "allow_dev_identity": false,
+    "require_auth_for_api": true,
+    "cookie_name": "agent_auth",
+    "issuer": "agent-gateway",
+    "audience": "agent-gateway",
+    "clock_skew_seconds": 60,
+    "token_ttl_seconds": 28800,
+    "cookie_http_only": true,
+    "cookie_secure": false,
+    "cookie_same_site": "Lax",
+    "require_session_record": false,
+    "auto_provision_session": true,
+    "session_store_backend": "sqlite",
+    "session_database_path": "data/agent_gateway/auth_sessions.db",
+    "redis_host": "127.0.0.1",
+    "redis_port": "5000",
+    "redis_pool_size": 16,
+    "redis_command_timeout_ms": 5000,
+    "redis_key_prefix": "agent:gateway:auth",
+    "generate_dev_keys": true
+  },
+  "llm": {
+    "enabled": true,
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key_env": "AGENT_LLM_API_KEY",
+    "api_key_file": "",
+    "model": "deepseek-chat",
+    "timeout_ms": 30000,
+    "max_retries": 2,
+    "async_http_io_threads": 4,
+    "http_keep_alive": true,
+    "http_max_idle_connections": 128,
+    "http_max_idle_connections_per_origin": 64,
+    "http_idle_timeout_ms": 30000,
+    "response_validation": {
+      "token_count_mode": "off",
+      "tokenizer_path": "",
+      "tokenizer_model": "deepseek-chat",
+      "max_token_difference": 2
+    },
+    "require_api_key": true,
+    "allow_placeholder": false,
+    "disable_tls_verify_on_windows": false,
+    "ca_bundle_path": "config/certs/mozilla-ca-bundle.pem"
+  },
+  "skills": {
+    "enabled": true,
+    "manifest_directory": "skills",
+    "manifest_filename_regex": ".*skill.*\\.json$",
+    "manifests": [],
+    "tool_memory_sqlite_path": "data/skill_l4.sqlite",
+    "tool_memory_collection_name": "skill_l4",
+    "tool_memory_top_k": 3,
+    "tool_memory_min_score": 0.78
+  },
+  "local_llm": {
+    "enabled": false,
+    "target": "127.0.0.1:50051",
+    "deadline_ms": 30000,
+    "auth_token": "",
+    "auth_metadata_key": "authorization"
   },
   "embedding": {
-    "tokenizer_path": "path/to/tokenizer.json",
-    "onnx_model_path": "path/to/embedding-model.onnx",
+    "tokenizer_path": "onnx_models/minilm/tokenizer.json",
+    "model_path": "onnx_models/minilm/model.onnx",
+    "dimension": 384,
     "execution_provider": "auto",
-    "allow_cpu_fallback": true,
-    "cuda_device_id": 0,
-    "intra_op_num_threads": 0,
-    "inter_op_num_threads": 0,
-    "pooling_strategy": "mean",
-    "normalize": true,
-    "expected_dimension": 384,
-    "require_token_type_ids": false,
     "batch_enabled": true,
     "batch_max_pending_requests": 1024,
     "batch_max_size": 16,
     "batch_max_wait_ms": 2,
     "batch_max_inflight": 1
   },
-  "grpc": {
-    "host": "0.0.0.0",
-    "port": "50051",
-    "log_dir": "logs",
-    "num_cqs": 0,
-    "min_pollers": 0,
-    "max_pollers": 0,
-    "max_receive_message_mb": 100,
-    "max_send_message_mb": 10,
-    "stats_log_interval_seconds": 30,
-    "slow_request_ms": 250
+  "emotion_analyzer": {
+    "enabled": true,
+    "backend": "grpc",
+    "target": "127.0.0.1:50051",
+    "tokenizer_path": "onnx_models/joint/tokenizer.json",
+    "deadline_ms": 3000,
+    "auth_token": "",
+    "auth_metadata_key": "authorization",
+    "max_length": 96,
+    "truncation": true,
+    "padding": true,
+    "add_special_tokens": true
   },
-  "auth": {
-    "metadata_key": "x-agent-auth",
-    "token": "",
-    "token_file": "",
-    "token_env": "AGENT_BACKEND_AUTH_TOKEN"
-  },
-  "limits": {
-    "max_image_mb": 20,
-    "max_image_pixels": 16777216,
-    "max_image_width": 8192,
-    "max_image_height": 8192,
-    "max_prompt_bytes": 8192,
-    "min_context_size": 128,
-    "max_context_size": 8192,
-    "max_vlm_tokens": 2048,
-    "max_temperature": 2.0,
-    "max_top_k": 1000,
-    "max_sequence_length": 512,
-    "max_batch_size": 64,
-    "max_token_id": 10000000,
-    "max_abs_personality": 100.0
-  },
-  "vram_guard": {
-    "monitor_interval_seconds": 10,
-    "warning_free_mb": 1024,
-    "unload_free_mb": 512,
-    "min_free_before_load_mb": 0,
-    "reload_after_unload": false,
-    "unload_on_oom_error": true
-  },
-  "vlm_cache": {
-    "enabled": false,
-    "reuse_policy": "result_vector",
-    "persist": false,
-    "dir": "cache/vlm",
-    "max_entries": 512,
-    "max_mb": 1024,
-    "ttl_seconds": 3600,
-    "store_images": true,
-    "store_prompts": true,
-    "stale_on_failure": true,
-    "default_allow_cache": true,
-    "vector": {
-      "enabled": false,
-      "sim_threshold_high": 0.97,
-      "sim_threshold_mid": 0.93,
-      "max_saliency_for_mid": 0.15,
-      "max_entries_per_bucket": 256,
-      "ttl_seconds": 3600,
-      "dir": "cache/vlm/vectors"
+  "emotion_fusion": {
+    "enabled": true,
+    "bert_weight": 1.0,
+    "default_reliability": 0.7,
+    "accept_confidence": 0.55,
+    "ambiguity_margin": 0.12,
+    "head_bias": 0.0,
+    "bert_signal_weight": 2.0,
+    "evidence_signal_weight": 2.2,
+    "margin_signal_weight": 0.5,
+    "source_weights": {
+      "keyword": 0.75,
+      "vector": 0.85,
+      "llm": 0.9
     },
-    "prompt_kv": {
-      "enabled": false,
-      "backend": "memory",
-      "redis_host": "127.0.0.1",
-      "redis_port": 5000,
-      "redis_password": "",
-      "redis_pool_size": 4,
-      "redis_command_timeout_ms": 5000,
-      "key_prefix": "agent:vlm:prompt_kv",
-      "ttl_seconds": 3600,
-      "max_mb": 512,
-      "near_embedding_enabled": false,
-      "near_same_session_min_cosine": 0.99,
-      "near_cross_session_min_cosine": 0.995,
-      "near_same_session_min_mean_token_cosine": 0.99,
-      "near_cross_session_min_mean_token_cosine": 0.995,
-      "near_same_session_min_p05_token_cosine": 0.95,
-      "near_cross_session_min_p05_token_cosine": 0.98,
-      "near_same_session_max_relative_l2": 0.15,
-      "near_cross_session_max_relative_l2": 0.10
+    "label_reliability": {
+      "joy": 0.78,
+      "sadness": 0.72,
+      "anger": 0.69,
+      "fear": 0.64,
+      "surprise": 0.58,
+      "disgust": 0.52,
+      "neutral": 0.82,
+      "excitement": 0.74,
+      "tenderness": 0.70,
+      "curiosity": 0.76
+    },
+    "keyword_rules": {
+      "sadness": [
+        {
+          "pattern": "考砸|学不会|没希望",
+          "score": 0.95
+        }
+      ],
+      "curiosity": [
+        "为什么|怎么来的|能不能再讲"
+      ]
     }
+  },
+  "emotion": {
+    "generation": {
+      "max_tokens": 2048,
+      "min_tokens": 100,
+      "max_token_ratio": 1.25,
+      "default_token_weight": 1.0,
+      "high_intensity_threshold": 0.7,
+      "high_intensity_multiplier": 1.1,
+      "token_weights": {
+        "neutral": 1.0,
+        "joy": 1.0,
+        "excitement": 1.05,
+        "sadness": 1.1,
+        "fear": 1.1,
+        "anger": 1.05,
+        "disgust": 1.0,
+        "surprise": 1.05,
+        "tenderness": 1.05,
+        "curiosity": 1.15
+      }
+    }
+  },
+  "l0_memory": {
+    "enabled": true,
+    "redis_host": "127.0.0.1",
+    "redis_port": 5000,
+    "sqlite_path": "data/agent_gateway/l0_memory.db",
+    "max_cached_records": 1000,
+    "top_k": 5,
+    "candidate_multiplier": 4,
+    "neighbors_per_hit": 1,
+    "similarity_floor": 0.78,
+    "warm_window_seconds": 3600,
+    "half_life_seconds": 172800,
+    "max_age_seconds": 604800,
+    "user_uuid": "gateway-l0"
+  },
+  "document_store": {
+    "enabled": true,
+    "root": "data/agent_gateway/documents",
+    "database_path": "data/agent_gateway/document_store.db",
+    "read_connection_count": 2,
+    "write_connection_count": 1,
+    "busy_timeout_ms": 5000,
+    "retention_hours": 168,
+    "cleanup_interval_seconds": 60
+  },
+  "document_llm_chunk_cache": {
+    "enabled": true,
+    "redis_host": "127.0.0.1",
+    "redis_port": 5000,
+    "redis_pool_size": 4,
+    "key_prefix": "agent:gateway:document:llm_chunk",
+    "ttl_seconds": 604800
+  },
+  "document_semantic_cache": {
+    "enabled": true,
+    "redis_host": "127.0.0.1",
+    "redis_port": 5000,
+    "sqlite_path": "data/agent_gateway/document_semantic_cache.db",
+    "user_uuid": "document-semantic-cache",
+    "max_cached_records": 10000,
+    "top_k": 6,
+    "similarity_floor": 0.94
+  },
+  "l3_memory": {
+    "enabled": true,
+    "sqlite_path": "data/agent_gateway/l3_memory.db",
+    "registry_sqlite_path": "data/agent_gateway/l3_registry.db",
+    "collection_name": "l3_memory",
+    "embedding_fingerprint": "minilm-l6-v2",
+    "tokenizer_fingerprint": "minilm-l6-v2",
+    "corpus_version": "v1",
+    "policy_version": "v1",
+    "index_backend": "exact",
+    "max_resident_partitions": 16,
+    "max_records_per_batch": 1000,
+    "compression_max_tokens": 800,
+    "compression_temperature": 0.1,
+    "user_uuids": [
+      "gateway-l0"
+    ]
+  },
+  "l3_flush_scheduler": {
+    "enabled": true,
+    "check_interval_seconds": 300,
+    "flush_hour": 3,
+    "flush_minute": 0,
+    "flush_date_offset_days": 0,
+    "defer_when_sessions_active": true
   }
 }

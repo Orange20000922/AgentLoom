@@ -54,6 +54,9 @@ public:
     virtual core::Status HoldReclamationUntil(PersonaSessionReclamationRequest request) = 0;
     virtual core::Status ReleaseReclamationHold(PersonaSessionQuery query) = 0;
     virtual core::Status SubmitTurn(PersonaTurnRequest request, TurnCallback callback) = 0;
+    /// 请求取消当前异步 Turn；trusted_user_uuid 校验 owner，trace_id 标识取消请求。
+    /// 返回 OK 表示请求已接纳，原 Turn callback 在 Provider 收口后恰好返回一次 Cancelled。
+    virtual core::Status CancelTurn(PersonaSessionQuery query) = 0;
     virtual PersonaInteractionSnapshot SystemSnapshot() const = 0;
 };
 
@@ -72,6 +75,7 @@ public:
     core::Status HoldReclamationUntil(PersonaSessionReclamationRequest request) override;
     core::Status ReleaseReclamationHold(PersonaSessionQuery query) override;
     core::Status SubmitTurn(PersonaTurnRequest request, TurnCallback callback) override;
+    core::Status CancelTurn(PersonaSessionQuery query) override;
     PersonaInteractionSnapshot SystemSnapshot() const override;
 
 private:

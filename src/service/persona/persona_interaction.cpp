@@ -139,6 +139,20 @@ core::Status PersonaInteraction::SubmitTurn(PersonaTurnRequest request,
     return status;
 }
 
+core::Status PersonaInteraction::CancelTurn(PersonaSessionQuery query) {
+    auto snapshot = GetSession(query);
+    if (!snapshot.ok()) {
+        return snapshot.status();
+    }
+    // query.trace_id 属于取消请求的日志链路，不作为原 Turn 的匹配条件。
+    auto status = runtime_.CancelAsyncTurn(query.session_id);
+    if (!status.ok() && status.code() != core::ErrorCode::NotFound) {
+        logger_.warn("[persona-interaction] cancel turn session={} failed: {}",
+                     query.session_id, status.message());
+    }
+    return status;
+}
+
 PersonaInteractionSnapshot PersonaInteraction::SystemSnapshot() const {
     return PersonaInteractionSnapshot{
         sessions_.SessionCount(),

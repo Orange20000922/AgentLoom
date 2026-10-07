@@ -7,7 +7,7 @@ APP_ROLE="${APP_ROLE:-gateway}"
 resolve_default_config() {
     case "$1" in
         gateway)
-            echo "$APP_ROOT/config/agent_gateway.example.json"
+            echo "$APP_ROOT/config/agent_gateway.container.example.json"
             ;;
         emotion-inference)
             echo "$APP_ROOT/config/emotion.json"
