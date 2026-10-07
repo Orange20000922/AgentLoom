@@ -111,6 +111,8 @@ public:
         agent::llm::ChatCompletionResponse response;
         response.model = req.model;
         response.content = "student reply";
+        response.prompt_tokens = 10;
+        response.completion_tokens = 6;
         response.total_tokens = 16;
         return response;
     }
@@ -276,6 +278,23 @@ TEST(PersonaInteractionTest, EnsuresSessionAndEnforcesTrustedOwner) {
     auto ensured = interaction.EnsureSession(std::move(create));
     ASSERT_TRUE(ensured.ok()) << ensured.status().message();
     EXPECT_EQ(fixture.sessions.SessionCount(), 1u);
+
+    // Application 使用的公共 PersonaInteraction 边界必须保留 Runtime 返回的协议用量。
+    agent::service::persona::PersonaTurnRequest turn;
+    turn.trusted_user_uuid = request.user_uuid;
+    turn.turn.session_id = request.session_id;
+    turn.turn.user_input = "usage propagation";
+    std::promise<core::Result<agent::service::persona::ChatResponse>> completed;
+    auto future = completed.get_future();
+    ASSERT_TRUE(interaction.SubmitTurn(std::move(turn), [&completed](auto result) {
+        completed.set_value(std::move(result));
+    }).ok());
+    ASSERT_EQ(future.wait_for(2s), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_EQ(result.value().prompt_tokens, 10);
+    EXPECT_EQ(result.value().completion_tokens, 6);
+    EXPECT_EQ(result.value().total_tokens, 16);
 
     auto denied = interaction.GetSession(PersonaSessionQuery{
         created.value().session_id,

@@ -202,6 +202,9 @@ struct WebSocketControlEvent {
 class WebSocketSessionHandle {
 public:
     virtual ~WebSocketSessionHandle() = default;
+    // 复用连接租约的只读上下文；引用仅在句柄存活且连接未关闭时有效，不转移所有权。
+    virtual const ConnectionContext& connection() const noexcept = 0;
+    std::uint64_t connection_id() const noexcept { return connection().connection_id; }
     // Sends one outbound frame. The implementation serializes writes and
     // copies payloads into session-owned memory before applying backpressure.
     virtual core::Status Send(WebSocketFrame frame) = 0;

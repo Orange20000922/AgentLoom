@@ -344,6 +344,7 @@ bool HttpServer::HttpSession::TryUpgradeWebSocket() {
 
     WebSocketSessionOptions options;
     options.request_timeout = server_.options_.request_timeout;
+    options.logger = server_.options_.logger;
     options.read_buffer_limit = server_.options_.websocket_read_buffer_limit;
     options.websocket = server_.options_.websocket;
     options.read_tuning = stream_handler

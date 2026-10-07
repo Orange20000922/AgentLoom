@@ -3,6 +3,7 @@
 #include "connection_pool.h"
 #include "http_request_filter.h"
 #include "http_types.h"
+#include "logger_adapter.h"
 #include "protocol_types.h"
 #include "request_interfaces.h"
 #include "static_file_handler.h"
@@ -48,6 +49,8 @@ struct HttpServerOptions {
     // before access control, route handlers, static files, or WebSocket upgrade.
     HttpRequestFilterOptions request_filter;
     std::optional<StaticFileOptions> static_files;
+    // 网络层统一输出 WS 生命周期日志；静态链接消费者可注入自己的模块 logger。
+    core::LoggerAdapter logger = core::LoggerAdapter::ForModule("net");
 };
 
 using HttpGeneratorCallback = std::function<void(http::message_generator)>;

@@ -261,6 +261,11 @@ struct ChatResponse {
     AnswerCacheInfo answer_cache;
     ChatLatencyBreakdown latency;
     std::vector<llm::ChatMessage> messages;
+    // 本轮成功对话 LLM 调用的协议用量，含工具 follow-up；缓存直返为零。
+    // Provider 未返回 usage 时沿用客户端的零值，不估算，也不包含情绪分析调用。
+    std::int64_t prompt_tokens = 0;
+    std::int64_t completion_tokens = 0;
+    std::int64_t total_tokens = 0;
 };
 
 using ChatCallback = std::function<void(core::Result<ChatResponse>)>;
@@ -332,6 +337,10 @@ private:
         std::chrono::steady_clock::time_point started_at;
         std::chrono::steady_clock::time_point io_submitted_at;
         ChatLatencyBreakdown latency;
+        // 保留工具调用首轮用量，最终结果再加最后一次生成，避免覆盖首轮计量。
+        std::int64_t prompt_tokens = 0;
+        std::int64_t completion_tokens = 0;
+        std::int64_t total_tokens = 0;
     };
 
     struct CompletedChat {
