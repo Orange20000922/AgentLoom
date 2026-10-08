@@ -13,7 +13,7 @@
 
 ## 当前设计
 
-- [LLM 协议解耦与对话 Streaming（2026-10，讨论稿）](LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md)
+- [LLM 协议解耦与对话 Streaming（2026-10，阶段 1–2 已实现）](LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md)
 - [Resource Governance Refactor](RESOURCE_GOVERNANCE_REFACTOR_DESIGN.md)
 - [Downstream Integration Execution Plan (2026-08)](DOWNSTREAM_INTEGRATION_EXECUTION_PLAN_2026_08.md)
 - [Session Persistence Contracts (2026-08)](SESSION_PERSISTENCE_CONTRACTS_2026_08.md)

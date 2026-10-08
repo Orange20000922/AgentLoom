@@ -1,7 +1,7 @@
 #pragma once
 
 #include "logger_adapter.h"
-#include "openai_llm_client.h"
+#include "llm_client.h"
 #include "ordered_bitmap_window.h"
 #include "thread_pool.h"
 

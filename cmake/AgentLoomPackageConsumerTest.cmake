@@ -92,6 +92,13 @@ if(DEFINED AGENTLOOM_CONSUMER_TOOLCHAIN_FILE AND NOT AGENTLOOM_CONSUMER_TOOLCHAI
     list(APPEND _consumer_configure_command
         "-DCMAKE_TOOLCHAIN_FILE=${AGENTLOOM_CONSUMER_TOOLCHAIN_FILE}")
 endif()
+if(DEFINED OpenCV_DIR AND NOT OpenCV_DIR STREQUAL "")
+    list(APPEND _consumer_configure_command "-DOpenCV_DIR=${OpenCV_DIR}")
+endif()
+if(DEFINED AgentLoom_GSTREAMER_ROOT AND NOT AgentLoom_GSTREAMER_ROOT STREQUAL "")
+    list(APPEND _consumer_configure_command
+        "-DAgentLoom_GSTREAMER_ROOT=${AgentLoom_GSTREAMER_ROOT}")
+endif()
 if(DEFINED _consumer_effective_triplet AND NOT _consumer_effective_triplet STREQUAL "")
     list(APPEND _consumer_configure_command
         "-DVCPKG_TARGET_TRIPLET=${_consumer_effective_triplet}")

@@ -47,7 +47,7 @@
 
 | 文档 | 状态 | 内容 |
 |------|------|------|
-| [LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md](architecture/LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md) | 讨论稿 | 协议多态、对话 streaming、逐模块迁移及上游状态边界，尚未冻结或实施 |
+| [LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md](architecture/LLM_PROTOCOL_AND_STREAMING_REFACTOR_DESIGN_2026_10.md) | 当前实现 + 讨论稿 | 公共 LLM 接口与 Chat Completions 协议多态已实现；streaming 和上游状态仍待分阶段评审 |
 | [CONFIG_SYSTEM.md](runtime/CONFIG_SYSTEM.md) | 当前规范 | JSON section、CLI override 和配置扩展方式 |
 | [FRONTEND_BACKEND_API_PROTOCOL.md](gateway/FRONTEND_BACKEND_API_PROTOCOL.md) | 当前规范 | HTTP、WebSocket、认证、文档和 Skill API |
 | [GATEWAY_FRONTEND_SESSION_ALIGNMENT.md](gateway/GATEWAY_FRONTEND_SESSION_ALIGNMENT.md) | 当前设计 | Gateway、前端和 session 生命周期对齐 |

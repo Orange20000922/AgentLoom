@@ -6,7 +6,7 @@
 #include "../../storage/vector/vector_partition_registry.h"
 #include "embedding_pipeline.h"
 #include "embedding_batch_coordinator.h"
-#include "../../llm/openai_llm_client.h"
+#include "../../llm/llm_client.h"
 
 #include <memory>
 #include <functional>

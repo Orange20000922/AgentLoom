@@ -1,7 +1,7 @@
 #pragma once
 
 #include "skill_registry.h"
-#include "../llm/openai_llm_client.h"
+#include "../llm/llm_client.h"
 
 #include <memory>
 #include <string>

@@ -2,7 +2,7 @@
 
 #include "isemantic_cache.h"
 #include "long_term_memory_compressor.h"
-#include "openai_llm_client.h"
+#include "llm_client.h"
 #include "session_manager.h"
 #include "skill_session_manager.h"
 #include "stateful_skill_registry.h"

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../llm/openai_llm_client.h"
+#include "../llm/llm_client.h"
 #include "../semantic_cache/redis_connection_pool.h"
 #include "../semantic_cache/semantic_cache_pipeline.h"
 #include "../storage/vector/vector_repository.h"

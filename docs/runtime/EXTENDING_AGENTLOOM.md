@@ -158,6 +158,19 @@ dependencies.report_evaluator = std::make_shared<CommercialReportEvaluator>(/* .
 
 ## 5. 本地配置
 
+### LLM 协议扩展
+
+业务模块依赖 `llm/llm_client.h`，HTTP 组合根依赖 `llm/openai_llm_client.h`。
+`ILlmProtocol` 位于 `llm/llm_protocol.h`，负责 endpoint、能力声明、请求校验、body 编码和成功 body 解码。
+实现新协议后通过 `OpenAiLlmClientOptions::protocol` 注入，同步与异步客户端均复用这份逻辑。
+默认 `ChatCompletionsProtocol` 保留原有线格式，HTTP status、认证、重试、超时与取消由客户端处理。
+协议对象不可保存单次调用的可变状态，也不借用 HTTP body 的存储；解码结果必须拥有自己的数据。
+
+旧消费者仍可包含 `openai_llm_client.h` 取得原公共名称与函数。新增协议字段要求 SDK 与消费者一起重编译。
+`Capabilities()` 表示协议可表达的能力，实际 Provider/模型能力另行验证。
+streaming decoder 扩展入口目前返回 `Unimplemented`，完整客户端仍拒绝 `stream=true`；
+此接口抽取不代表 Responses 或流式输出已经可用。
+
 ### Persona Turn 取消
 
 下游通过 `IPersonaInteraction::CancelTurn(PersonaSessionQuery)` 按 Session 请求取消当前异步 Turn。

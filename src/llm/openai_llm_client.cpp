@@ -1,98 +1,43 @@
 #include "openai_llm_client.h"
-#include "text_validation.h"
 #include "logger_adapter.h"
 
 #include <boost/asio.hpp>
-#include <nlohmann/json.hpp>
 #include <atomic>
-#include <cstdint>
 #include <exception>
-#include <fstream>
-#include <limits>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
+#include <utility>
 
 namespace agent::llm {
 
-using Json = nlohmann::json;
-
 namespace {
 
-std::string RoleToString(ChatRole role) {
-    switch (role) {
-        case ChatRole::System: return "system";
-        case ChatRole::User: return "user";
-        case ChatRole::Assistant: return "assistant";
-        case ChatRole::Tool: return "tool";
+// 同步/异步共享 HTTP envelope；线协议仅提供 endpoint 和自有编码结果。
+core::Result<net::HttpClientRequest> BuildHttpRequest(
+    const OpenAiLlmClientOptions& options, const ChatCompletionRequest& request) {
+    const LlmProtocolContext context{options.default_model, options.response_validation};
+    auto encoded = options.protocol->EncodeRequest(request, context);
+    if (!encoded.ok()) return encoded.status();
+    auto url = options.base_url;
+    if (url.back() != '/') url.push_back('/');
+    url.append(options.protocol->Endpoint());
+    net::HttpClientRequest http_request;
+    http_request.method = "POST";
+    http_request.url = std::move(url);
+    http_request.headers.push_back({"Content-Type", "application/json"});
+    if (!options.api_key.empty()) {
+        http_request.headers.push_back({"Authorization", "Bearer " + options.api_key});
     }
-    return "user";
+    http_request.body = std::move(encoded).value();
+    http_request.timeout_ms = options.timeout_ms;
+    return http_request;
 }
 
-Json ContentPartToJson(const ChatContentPart& part) {
-    switch (part.type) {
-        case ChatContentPartType::Text:
-            return Json{{"type", "text"}, {"text", part.text}};
-        case ChatContentPartType::ImageUrl:
-            return Json{{"type", "image_url"}, {"image_url", {{"url", part.image_url}}}};
-    }
-    return Json{{"type", "text"}, {"text", part.text}};
-}
-
-Json BuildRequestJson(const ChatCompletionRequest& req, const std::string& default_model) {
-    Json j;
-    j["model"] = req.model.empty() ? default_model : req.model;
-    j["messages"] = Json::array();
-    for (const auto& msg : req.messages) {
-        Json msg_obj;
-        msg_obj["role"] = RoleToString(msg.role);
-        if (msg.parts.empty()) {
-            msg_obj["content"] = msg.content;
-        } else {
-            msg_obj["content"] = Json::array();
-            for (const auto& part : msg.parts) {
-                msg_obj["content"].push_back(ContentPartToJson(part));
-            }
-        }
-        if (!msg.tool_calls.empty()) {
-            if (msg.content.empty()) msg_obj["content"] = nullptr;
-            msg_obj["tool_calls"] = Json::array();
-            for (const auto& call : msg.tool_calls) {
-                msg_obj["tool_calls"].push_back({{"id", call.id}, {"type", "function"},
-                    {"function", {{"name", call.name}, {"arguments", call.arguments_json}}}});
-            }
-        }
-        if (msg.role == ChatRole::Tool) msg_obj["tool_call_id"] = msg.tool_call_id;
-        if (msg.reasoning_content) msg_obj["reasoning_content"] = *msg.reasoning_content;
-        j["messages"].push_back(msg_obj);
-    }
-    j["temperature"] = req.temperature;
-    if (req.max_tokens > 0) {
-        j["max_tokens"] = req.max_tokens;
-    }
-    j["top_p"] = req.top_p;
-    j["n"] = req.n;
-    j["stream"] = req.stream;
-    if (!req.tools.empty()) {
-        j["tools"] = Json::array();
-        for (const auto& tool : req.tools) {
-            const auto parameters = Json::parse(tool.parameters_json);
-            j["tools"].push_back({{"type", "function"}, {"function", {
-                {"name", tool.name}, {"description", tool.description}, {"parameters", parameters}
-            }}});
-        }
-    }
-    if (!req.tool_choice.empty()) j["tool_choice"] = req.tool_choice;
-    if (req.parallel_tool_calls) j["parallel_tool_calls"] = *req.parallel_tool_calls;
-    return j;
-}
-
-core::Result<ChatCompletionResponse> ParseResponse(
-    const std::string& body,
-    int status_code,
-    const ChatCompletionRequest& request,
-    const OpenAiLlmClientOptions& options,
-    core::LoggerAdapter& logger) {
+core::Result<ChatCompletionResponse> DecodeHttpResponse(
+    const net::HttpClientResponse& response, const ChatCompletionRequest& request,
+    const OpenAiLlmClientOptions& options, core::LoggerAdapter& logger) {
+    const auto status_code = response.status;
+    const auto& body = response.body;
     if (status_code != 200) {
         core::ErrorCode code = core::ErrorCode::InternalError;
         if (status_code == 401 || status_code == 403) {
@@ -106,313 +51,21 @@ core::Result<ChatCompletionResponse> ParseResponse(
             "LLM API returned status " + std::to_string(status_code) + ": " + body);
     }
 
-    if (body.empty()) {
-        return core::Status::Error(core::ErrorCode::DataLoss, "LLM response body is empty");
-    }
-    Json j;
+    const LlmProtocolContext context{options.default_model, options.response_validation};
     try {
-        j = Json::parse(body);
-    } catch (const std::exception& e) {
-        return core::Status(core::ErrorCode::DataLoss,
-            std::string("Failed to parse LLM response: ") + e.what());
+        return options.protocol->DecodeResponse(body, request, context, logger);
+    } catch (const std::exception& error) {
+        // 第三方协议异常必须在异步 noexcept 回调边界前转为统一 Status。
+        logger.error("LLM protocol response exception: {}", error.what());
+        return core::Status::Error(core::ErrorCode::InternalError,
+                                  std::string("LLM client exception: ") + error.what());
+    } catch (...) {
+        logger.error("LLM protocol response exception: unknown error");
+        return core::Status::Error(core::ErrorCode::InternalError,
+                                  "LLM client exception: unknown error");
     }
-
-    ChatCompletionResponse resp;
-    if (j.contains("id") && j["id"].is_string()) {
-        resp.id = j["id"].get<std::string>();
-    }
-    if (j.contains("model") && j["model"].is_string()) {
-        resp.model = j["model"].get<std::string>();
-    }
-
-    if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty()) {
-        return core::Status(core::ErrorCode::DataLoss,
-            "LLM response missing choices array");
-    }
-
-    const auto& choice = j["choices"][0];
-    if (!choice.contains("message") || !choice["message"].is_object()) {
-        return core::Status(core::ErrorCode::DataLoss,
-            "LLM response missing message object");
-    }
-
-    const auto& message = choice["message"];
-    if (message.contains("content") && !message["content"].is_null() && !message["content"].is_string()) {
-        return core::Status::Error(core::ErrorCode::DataLoss, "LLM content must be text or null");
-    }
-    const bool has_content = message.contains("content") && message["content"].is_string();
-    if (has_content) {
-        resp.content = message["content"].get<std::string>();
-    }
-    if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
-        if (!choice["finish_reason"].is_string()) {
-            return core::Status::Error(core::ErrorCode::DataLoss,
-                                       "LLM finish_reason must be text or null");
-        }
-        resp.finish_reason = choice["finish_reason"].get<std::string>();
-    }
-    if (message.contains("reasoning_content") && !message["reasoning_content"].is_null()) {
-        if (!message["reasoning_content"].is_string()) {
-            return core::Status::Error(core::ErrorCode::DataLoss,
-                                       "LLM reasoning_content must be text or null");
-        }
-        resp.reasoning_content = message["reasoning_content"].get<std::string>();
-    }
-    if (message.contains("tool_calls") && !message["tool_calls"].is_null()) {
-        if (!message["tool_calls"].is_array()) {
-            return core::Status::Error(core::ErrorCode::DataLoss, "LLM tool_calls must be an array");
-        }
-        std::unordered_set<std::string> ids;
-        for (const auto& call : message["tool_calls"]) {
-            // 整批拒绝损坏调用，避免部分执行产生不可解释的副作用。
-            if (!call.is_object() || !call.contains("id") || !call["id"].is_string() ||
-                !call.contains("type") || call["type"] != "function" ||
-                !call.contains("function") || !call["function"].is_object()) {
-                return core::Status::Error(core::ErrorCode::DataLoss, "malformed LLM tool call");
-            }
-            const auto& fn = call["function"];
-            if (!fn.contains("name") || !fn["name"].is_string() ||
-                !fn.contains("arguments") ||
-                (!fn["arguments"].is_string() && !fn["arguments"].is_object())) {
-                return core::Status::Error(core::ErrorCode::DataLoss, "malformed LLM function fields");
-            }
-            const auto arguments = fn["arguments"].is_string()
-                ? fn["arguments"].get<std::string>()
-                : fn["arguments"].dump();
-            ChatToolCall parsed{call["id"].get<std::string>(), fn["name"].get<std::string>(), arguments};
-            if (parsed.id.empty() || parsed.name.empty() || !ids.insert(parsed.id).second) {
-                return core::Status::Error(core::ErrorCode::DataLoss, "invalid or duplicate LLM tool call id");
-            }
-            resp.tool_calls.push_back(std::move(parsed));
-        }
-    }
-    if (j.contains("usage") && !j["usage"].is_null() && !j["usage"].is_object()) {
-        return core::Status::Error(core::ErrorCode::DataLoss,
-                                   "LLM usage must be an object or null");
-    }
-    if (j.contains("usage") && j["usage"].is_object()) {
-        const auto& usage = j["usage"];
-        const auto read_tokens = [&usage](std::string_view name, int& target) -> core::Status {
-            const auto found = usage.find(std::string(name));
-            if (found == usage.end()) {
-                return core::Status::Ok();
-            }
-            if (!found->is_number_integer() && !found->is_number_unsigned()) {
-                return core::Status::Error(
-                    core::ErrorCode::DataLoss,
-                    "LLM usage." + std::string(name) + " must be a non-negative integer");
-            }
-            try {
-                const auto value = found->get<std::int64_t>();
-                if (value < 0 || value > std::numeric_limits<int>::max()) {
-                    return core::Status::Error(
-                        core::ErrorCode::DataLoss,
-                        "LLM usage." + std::string(name) + " is out of range");
-                }
-                target = static_cast<int>(value);
-                return core::Status::Ok();
-            } catch (const std::exception&) {
-                return core::Status::Error(
-                    core::ErrorCode::DataLoss,
-                    "LLM usage." + std::string(name) + " is out of range");
-            }
-        };
-        if (auto status = read_tokens("prompt_tokens", resp.prompt_tokens); !status.ok()) {
-            return status;
-        }
-        if (auto status = read_tokens("completion_tokens", resp.completion_tokens); !status.ok()) {
-            return status;
-        }
-        if (auto status = read_tokens("total_tokens", resp.total_tokens); !status.ok()) {
-            return status;
-        }
-    }
-
-    if (resp.prompt_tokens < 0 || resp.completion_tokens < 0 || resp.total_tokens < 0 ||
-        (resp.total_tokens > 0 &&
-         resp.total_tokens < resp.prompt_tokens + resp.completion_tokens)) {
-        return core::Status::Error(core::ErrorCode::DataLoss,
-                                   "LLM response contains inconsistent token usage");
-    }
-    if (options.response_validation.reject_length_finish && resp.finish_reason == "length") {
-        return core::Status::Error(
-            core::ErrorCode::ResourceExhausted,
-            "LLM generation was truncated because the token budget was exhausted");
-    }
-    if (has_content) {
-        if (!core::IsValidUtf8(resp.content) || core::HasInvalidTextControl(resp.content)) {
-            return core::Status::Error(core::ErrorCode::DataLoss,
-                                       "LLM content is not valid UTF-8 text");
-        }
-    }
-    if (resp.reasoning_content &&
-        (!core::IsValidUtf8(*resp.reasoning_content) ||
-         core::HasInvalidTextControl(*resp.reasoning_content))) {
-        return core::Status::Error(core::ErrorCode::DataLoss,
-                                   "LLM reasoning_content is not valid UTF-8 text");
-    }
-    if (resp.tool_calls.empty() &&
-        (!has_content ||
-         (options.response_validation.reject_empty_content && core::IsBlankAscii(resp.content)))) {
-        return core::Status::Error(core::ErrorCode::Unavailable,
-                                   "LLM response contains no usable content or tool calls");
-    }
-
-    const auto& validation = options.response_validation;
-    if (validation.token_count_mode != CompletionTokenValidationMode::Off &&
-        validation.token_counter && resp.completion_tokens > 0) {
-        const auto model = resp.model.empty()
-            ? (request.model.empty() ? options.default_model : request.model)
-            : resp.model;
-        auto counted = validation.token_counter->CountTokens(model, resp);
-        if (!counted.ok()) {
-            if (validation.token_count_mode == CompletionTokenValidationMode::Strict) {
-                return counted.status();
-            }
-            logger.warn("LLM token count audit skipped model={} reason={}",
-                        model, counted.status().message());
-        } else {
-            const auto reported = static_cast<std::size_t>(resp.completion_tokens);
-            const auto actual = counted.value();
-            const auto difference = actual > reported ? actual - reported : reported - actual;
-            if (difference > validation.max_token_difference) {
-                if (validation.token_count_mode == CompletionTokenValidationMode::Strict) {
-                    return core::Status::Error(
-                        core::ErrorCode::DataLoss,
-                        "LLM completion token count differs from provider usage");
-                }
-                logger.warn(
-                    "LLM token count audit mismatch model={} reported={} actual={} difference={}",
-                    model, reported, actual, difference);
-            }
-        }
-    }
-
-    return resp;
 }
 
-}  // namespace
-
-core::Status ValidateChatCompletionRequest(const ChatCompletionRequest& request) {
-    const auto invalid = [](const char* reason) {
-        return core::Status::Error(core::ErrorCode::InvalidArgument, reason);
-    };
-    if (request.stream) return invalid("streaming completions are not implemented by this client");
-    if (request.tool_choice != "" && request.tool_choice != "none" &&
-        request.tool_choice != "auto" && request.tool_choice != "required") {
-        return invalid("unsupported tool_choice");
-    }
-    if ((request.tool_choice == "auto" || request.tool_choice == "required" ||
-         request.parallel_tool_calls.has_value()) && request.tools.empty()) {
-        return invalid("tool selection requires tool definitions");
-    }
-    std::unordered_set<std::string> names;
-    for (const auto& tool : request.tools) {
-        const auto schema = Json::parse(tool.parameters_json, nullptr, false);
-        if (tool.name.empty() || !names.insert(tool.name).second || !schema.is_object() ||
-            !schema.contains("type") || schema["type"] != "object") {
-            return invalid("tools require unique names and an object parameter schema");
-        }
-    }
-    // 一次 assistant 调用批次必须收齐结果，才能继续用户/助手消息。
-    std::unordered_set<std::string> pending;
-    std::unordered_set<std::string> used;
-    for (const auto& message : request.messages) {
-        if (message.role == ChatRole::Tool) {
-            if (message.tool_call_id.empty() || pending.erase(message.tool_call_id) != 1 ||
-                !message.tool_calls.empty() || !message.parts.empty() || message.reasoning_content) {
-                return invalid("tool result does not match a pending assistant call");
-            }
-            continue;
-        }
-        if (!pending.empty()) return invalid("assistant tool calls are missing results");
-        if (!message.tool_call_id.empty() ||
-            (message.role != ChatRole::Assistant && (!message.tool_calls.empty() || message.reasoning_content))) {
-            return invalid("tool metadata belongs to assistant or tool messages only");
-        }
-        for (const auto& call : message.tool_calls) {
-            if (call.id.empty() || call.name.empty() || !used.insert(call.id).second) {
-                return invalid("assistant tool call id is empty or duplicated");
-            }
-            pending.insert(call.id);
-        }
-    }
-    if (!pending.empty()) return invalid("assistant tool calls are missing results");
-    return core::Status::Ok();
-}
-
-ChatContentPart ChatContentPart::Text(std::string text) {
-    ChatContentPart part;
-    part.type = ChatContentPartType::Text;
-    part.text = std::move(text);
-    return part;
-}
-
-ChatContentPart ChatContentPart::ImageUrl(std::string image_url) {
-    ChatContentPart part;
-    part.type = ChatContentPartType::ImageUrl;
-    part.image_url = std::move(image_url);
-    return part;
-}
-
-ChatContentPart ChatContentPart::ImageData(std::string_view media_type, std::string_view base64_data) {
-    ChatContentPart part;
-    part.type = ChatContentPartType::ImageUrl;
-    part.image_url = "data:";
-    part.image_url.append(media_type);
-    part.image_url.append(";base64,");
-    part.image_url.append(base64_data);
-    return part;
-}
-
-core::Status LlmPromptStore::Load(
-    const std::unordered_map<std::string, std::filesystem::path>& prompt_paths,
-    const std::filesystem::path& config_dir) {
-
-    prompts_.clear();
-
-    for (const auto& [name, relative_path] : prompt_paths) {
-        std::filesystem::path full_path = config_dir / relative_path;
-
-        if (!std::filesystem::exists(full_path)) {
-            return core::Status(core::ErrorCode::NotFound,
-                "Prompt file not found: " + full_path.string());
-        }
-
-        std::ifstream file(full_path, std::ios::in | std::ios::binary);
-        if (!file) {
-            return core::Status(core::ErrorCode::InternalError,
-                "Failed to open prompt file: " + full_path.string());
-        }
-
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        if (file.bad()) {
-            return core::Status(core::ErrorCode::InternalError,
-                "Failed to read prompt file: " + full_path.string());
-        }
-
-        prompts_[name] = buffer.str();
-    }
-
-    return core::Status::Ok();
-}
-
-core::Result<std::string> LlmPromptStore::Get(const std::string& name) const {
-    auto it = prompts_.find(name);
-    if (it == prompts_.end()) {
-        return core::Status(core::ErrorCode::NotFound,
-            "Prompt not found: " + name);
-    }
-    return it->second;
-}
-
-bool LlmPromptStore::Has(const std::string& name) const {
-    return prompts_.find(name) != prompts_.end();
-}
-
-void LlmPromptStore::Clear() {
-    prompts_.clear();
 }
 
 core::Result<std::unique_ptr<OpenAiLlmClient>> OpenAiLlmClient::Create(
@@ -428,6 +81,7 @@ core::Result<std::unique_ptr<OpenAiLlmClient>> OpenAiLlmClient::Create(
             "OpenAI LLM client requires api_key");
     }
 
+    if (!options.protocol) options.protocol = std::make_shared<ChatCompletionsProtocol>();
     auto client = std::unique_ptr<OpenAiLlmClient>(
         new OpenAiLlmClient(std::move(options), http_client));
     return client;
@@ -441,7 +95,7 @@ OpenAiLlmClient::~OpenAiLlmClient() = default;
 core::Result<ChatCompletionResponse> OpenAiLlmClient::Complete(
     const ChatCompletionRequest& req) {
     try {
-        if (auto status = ValidateChatCompletionRequest(req); !status.ok()) {
+        if (auto status = options_.protocol->ValidateRequest(req); !status.ok()) {
             core::LoggerAdapter::ForModule("llm-client").warn("LLM request rejected: {}", status.message());
             return status;
         }
@@ -458,24 +112,9 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::Complete(
 core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
     const ChatCompletionRequest& req) {
 
-    Json request_json = BuildRequestJson(req, options_.default_model);
-    std::string request_body = request_json.dump(-1, ' ', false, Json::error_handler_t::replace);
-
-    std::string url = options_.base_url;
-    if (url.back() != '/') {
-        url += '/';
-    }
-    url += "chat/completions";
-
-    net::HttpClientRequest http_req;
-    http_req.method = "POST";
-    http_req.url = url;
-    http_req.headers.push_back({"Content-Type", "application/json"});
-    if (!options_.api_key.empty()) {
-        http_req.headers.push_back({"Authorization", "Bearer " + options_.api_key});
-    }
-    http_req.body = request_body;
-    http_req.timeout_ms = options_.timeout_ms;
+    auto built = BuildHttpRequest(options_, req);
+    if (!built.ok()) return built.status();
+    auto http_req = std::move(built).value();
 
     core::Status last_result_status;
     for (int attempt = 0; attempt <= options_.retry_policy.max_retries; ++attempt) {
@@ -503,34 +142,13 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
         }
 
         auto logger = core::LoggerAdapter::ForModule("llm-client");
-        return ParseResponse(http_resp.body, http_resp.status, req, options_, logger);
+        return DecodeHttpResponse(http_resp, req, options_, logger);
     }
 
     return last_result_status;
 }
 
 namespace {
-
-net::HttpClientRequest BuildHttpRequest(const OpenAiLlmClientOptions& options,
-                                        const ChatCompletionRequest& request) {
-    auto url = options.base_url;
-    if (url.back() != '/') {
-        url.push_back('/');
-    }
-    url += "chat/completions";
-
-    net::HttpClientRequest http_request;
-    http_request.method = "POST";
-    http_request.url = std::move(url);
-    http_request.headers.push_back({"Content-Type", "application/json"});
-    if (!options.api_key.empty()) {
-        http_request.headers.push_back({"Authorization", "Bearer " + options.api_key});
-    }
-    http_request.body = BuildRequestJson(request, options.default_model)
-        .dump(-1, ' ', false, Json::error_handler_t::replace);
-    http_request.timeout_ms = options.timeout_ms;
-    return http_request;
-}
 
 class AsyncOpenAiOperation;
 
@@ -603,10 +221,11 @@ class AsyncOpenAiOperation final : public IAsyncLlmOperation,
 public:
     AsyncOpenAiOperation(std::shared_ptr<OpenAiAsyncLlmClient::Impl> owner,
                          ChatCompletionRequest request,
+                         net::HttpClientRequest http_request,
                          IAsyncLlmClient::Callback callback)
         : owner_(std::move(owner)),
           request_(std::move(request)),
-          http_request_(BuildHttpRequest(owner_->options, request_)),
+          http_request_(std::move(http_request)),
           retry_timer_(owner_->retry_context),
           callback_(std::move(callback)) {}
 
@@ -675,8 +294,7 @@ private:
             ScheduleRetry();
             return;
         }
-        Finish(ParseResponse(
-            response.body, response.status, request_, owner_->options, owner_->logger));
+        Finish(DecodeHttpResponse(response, request_, owner_->options, owner_->logger));
     }
 
     void OnAttemptFailure(const core::Status& status) noexcept {
@@ -794,6 +412,7 @@ core::Result<std::unique_ptr<OpenAiAsyncLlmClient>> OpenAiAsyncLlmClient::Create
                                    "OpenAI async LLM timeout and retry options are invalid");
     }
     try {
+        if (!options.protocol) options.protocol = std::make_shared<ChatCompletionsProtocol>();
         auto impl = std::make_shared<Impl>(std::move(options), http_client);
         if (auto status = impl->Start(); !status.ok()) {
             return status;
@@ -820,13 +439,15 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::Complete
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "async LLM callback is required");
     }
-    if (auto status = ValidateChatCompletionRequest(request); !status.ok()) {
-        impl_->logger.warn("LLM request rejected: {}", status.message());
-        return status;
-    }
     try {
+        if (auto status = impl_->options.protocol->ValidateRequest(request); !status.ok()) {
+            impl_->logger.warn("LLM request rejected: {}", status.message());
+            return status;
+        }
+        auto built = BuildHttpRequest(impl_->options, request);
+        if (!built.ok()) return built.status();
         auto operation = std::make_shared<AsyncOpenAiOperation>(
-            impl_, std::move(request), std::move(callback));
+            impl_, std::move(request), std::move(built).value(), std::move(callback));
         if (auto status = impl_->Register(operation); !status.ok()) {
             return status;
         }
@@ -845,85 +466,5 @@ void OpenAiAsyncLlmClient::Shutdown() noexcept {
     }
 }
 
-FallbackLlmClient::FallbackLlmClient(std::shared_ptr<ILlmClient> primary,
-                                     std::shared_ptr<ILlmClient> fallback,
-                                     FallbackLlmClientOptions options)
-    : primary_(std::move(primary)),
-      fallback_(std::move(fallback)),
-      options_(options) {}
 
-core::Result<ChatCompletionResponse> FallbackLlmClient::Complete(const ChatCompletionRequest& req) {
-    if (!fallback_) {
-        return core::Status(core::ErrorCode::FailedPrecondition, "fallback llm client is required");
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if (!primary_) {
-        if (options_.fallback_on_primary_missing) {
-            return fallback_->Complete(req);
-        }
-        return core::Status(core::ErrorCode::FailedPrecondition, "primary llm client is missing");
-    }
-
-    if (!ShouldTryPrimary(now)) {
-        return fallback_->Complete(req);
-    }
-
-    auto primary_result = primary_->Complete(req);
-    if (primary_result.ok()) {
-        RecordPrimarySuccess();
-        return primary_result;
-    }
-
-    RecordPrimaryFailure();
-    if (!ShouldFallback(primary_result.status())) {
-        return primary_result.status();
-    }
-
-    auto fallback_result = fallback_->Complete(req);
-    if (fallback_result.ok()) {
-        return fallback_result;
-    }
-
-    return core::Status(
-        fallback_result.status().code(),
-        "primary llm failed: " + primary_result.status().message() +
-            "; fallback llm failed: " + fallback_result.status().message());
 }
-
-bool FallbackLlmClient::ShouldTryPrimary(std::chrono::steady_clock::time_point now) const {
-    std::lock_guard lock(mutex_);
-    return consecutive_failures_ < options_.failure_threshold || now >= next_primary_probe_;
-}
-
-bool FallbackLlmClient::ShouldFallback(const core::Status& status) const {
-    switch (status.code()) {
-    case core::ErrorCode::InvalidArgument:
-    case core::ErrorCode::FailedPrecondition:
-        return options_.fallback_on_primary_missing;
-    case core::ErrorCode::PermissionDenied:
-        return options_.fallback_on_auth_failure;
-    case core::ErrorCode::Unavailable:
-    case core::ErrorCode::Timeout:
-    case core::ErrorCode::ResourceExhausted:
-        return options_.fallback_on_unavailable;
-    default:
-        return false;
-    }
-}
-
-void FallbackLlmClient::RecordPrimarySuccess() {
-    std::lock_guard lock(mutex_);
-    consecutive_failures_ = 0;
-    next_primary_probe_ = {};
-}
-
-void FallbackLlmClient::RecordPrimaryFailure() {
-    std::lock_guard lock(mutex_);
-    ++consecutive_failures_;
-    if (consecutive_failures_ >= options_.failure_threshold) {
-        next_primary_probe_ = std::chrono::steady_clock::now() + options_.primary_reconnect_interval;
-    }
-}
-
-}  // namespace agent::llm

@@ -210,12 +210,24 @@ endif()
 
 if(AGENTLOOM_BUILD_LOCAL_LLM)
     foreach(_agentloom_llama_include_dir IN LISTS LLAMA_CPP_INCLUDE_DIRS)
-        get_filename_component(_agentloom_llama_include_name "${_agentloom_llama_include_dir}" NAME)
-        install(DIRECTORY "${_agentloom_llama_include_dir}/"
+        file(TO_CMAKE_PATH "${_agentloom_llama_include_dir}" _agentloom_llama_include_path)
+        get_filename_component(_agentloom_llama_include_name "${_agentloom_llama_include_path}" NAME)
+        install(DIRECTORY "${_agentloom_llama_include_path}/"
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AgentLoom/third_party/llama_cpp/${_agentloom_llama_include_name}")
     endforeach()
-    install(FILES ${LLAMA_CPP_LIBS} DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-    install(FILES ${LLAMA_CPP_RUNTIME_FILES} DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
+    set(_agentloom_llama_libraries "")
+    foreach(_agentloom_llama_library IN LISTS LLAMA_CPP_LIBS)
+        file(TO_CMAKE_PATH "${_agentloom_llama_library}" _agentloom_llama_library_path)
+        list(APPEND _agentloom_llama_libraries "${_agentloom_llama_library_path}")
+    endforeach()
+    install(FILES ${_agentloom_llama_libraries} DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    set(_agentloom_llama_runtime_files "")
+    foreach(_agentloom_llama_runtime IN LISTS LLAMA_CPP_RUNTIME_FILES)
+        file(TO_CMAKE_PATH "${_agentloom_llama_runtime}" _agentloom_llama_runtime_path)
+        list(APPEND _agentloom_llama_runtime_files "${_agentloom_llama_runtime_path}")
+    endforeach()
+    install(FILES ${_agentloom_llama_runtime_files}
+        DESTINATION "${CMAKE_INSTALL_BINDIR}" OPTIONAL)
 endif()
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AgentLoomWholeArchive.cmake"

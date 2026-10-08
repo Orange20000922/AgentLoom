@@ -9,6 +9,7 @@
 #include "../../src/config/server_options.h"
 #include "../../src/llm/openai_llm_client.h"
 #include "../../src/net/http_client/beast_http_client.h"
+#include "../../src/net/http_client/async_beast_http_client.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -181,6 +183,85 @@ const std::string kValidResponse = R"({
 }  // namespace
 
 // ── E2E: full chain from config file to LLM response ─────────────────────────
+
+namespace {
+
+// 仅在 E2E 中改变 endpoint；复用生产编解码，验证真实 HTTP 两条路径服从协议接口。
+class RoutedTestProtocol final : public agent::llm::ILlmProtocol {
+public:
+    std::string_view Endpoint() const noexcept override { return "test-protocol/complete"; }
+    agent::llm::LlmProtocolCapabilities Capabilities() const noexcept override {
+        return delegate_.Capabilities();
+    }
+    core::Status ValidateRequest(const ChatCompletionRequest& request) const override {
+        return delegate_.ValidateRequest(request);
+    }
+    core::Result<std::string> EncodeRequest(const ChatCompletionRequest& request,
+        const agent::llm::LlmProtocolContext& context) const override {
+        return delegate_.EncodeRequest(request, context);
+    }
+    core::Result<agent::llm::ChatCompletionResponse> DecodeResponse(std::string_view body,
+        const ChatCompletionRequest& request, const agent::llm::LlmProtocolContext& context,
+        core::LoggerAdapter& logger) const override {
+        return delegate_.DecodeResponse(body, request, context, logger);
+    }
+private:
+    agent::llm::ChatCompletionsProtocol delegate_;
+};
+
+class LlmProtocolIntegrationE2E : public testing::TestWithParam<bool> {};
+
+TEST_P(LlmProtocolIntegrationE2E, InjectedProtocolRunsThroughRealHttpAndMatchesDefaultWireFormat) {
+    auto behavior = std::make_shared<MockBehavior>();
+    behavior->body = kValidResponse;
+    auto server = MockOpenAiServer::Start(behavior);
+    OpenAiLlmClientOptions options;
+    options.base_url = "http://127.0.0.1:" + std::to_string(server->port()) + "/v1";
+    options.api_key = "protocol-e2e-key";
+    options.default_model = "deepseek-chat";
+    options.timeout_ms = 5000;
+    options.retry_policy.max_retries = 0;
+    options.protocol = std::make_shared<RoutedTestProtocol>();
+    ChatCompletionRequest request;
+    request.temperature = 0.5f;
+    request.messages.push_back({ChatRole::User, "你好"});
+    if (GetParam()) {
+        auto http_client = agent::net::AsyncBeastHttpClient::Create({});
+        ASSERT_TRUE(http_client.ok());
+        auto client = agent::llm::OpenAiAsyncLlmClient::Create(options, *http_client.value());
+        ASSERT_TRUE(client.ok());
+        std::promise<core::Result<agent::llm::ChatCompletionResponse>> completed;
+        auto future = completed.get_future();
+        ASSERT_TRUE(client.value()->CompleteAsync(request, [&](auto result) {
+            completed.set_value(std::move(result));
+        }).ok());
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        auto result = future.get();
+        ASSERT_TRUE(result.ok()) << result.status().message();
+        EXPECT_EQ(result.value().content, "记忆抽取完成：用户喜欢数学。");
+        EXPECT_EQ(result.value().total_tokens, 54);
+    } else {
+        auto http_client = BeastHttpClient::Create({});
+        ASSERT_TRUE(http_client.ok());
+        auto client = OpenAiLlmClient::Create(options, *http_client.value());
+        ASSERT_TRUE(client.ok());
+        auto result = client.value()->Complete(request);
+        ASSERT_TRUE(result.ok()) << result.status().message();
+        EXPECT_EQ(result.value().content, "记忆抽取完成：用户喜欢数学。");
+        EXPECT_EQ(result.value().total_tokens, 54);
+    }
+    EXPECT_EQ(behavior->last_target, "/v1/test-protocol/complete");
+    EXPECT_EQ(behavior->last_auth_header, "Bearer protocol-e2e-key");
+    auto default_body = agent::llm::ChatCompletionsProtocol{}.EncodeRequest(
+        request, {options.default_model, options.response_validation});
+    ASSERT_TRUE(default_body.ok());
+    EXPECT_EQ(behavior->last_body, default_body.value());
+    EXPECT_EQ(behavior->call_count.load(), 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(SyncAndAsync, LlmProtocolIntegrationE2E, testing::Bool());
+
+}
 
 TEST(LlmIntegrationE2E, FullChainFromConfigFile) {
     UnsetEnv("AGENT_LLM_API_KEY");
