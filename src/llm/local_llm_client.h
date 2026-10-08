@@ -1,6 +1,6 @@
 #pragma once
 
-#include "openai_llm_client.h"
+#include "llm_client.h"
 
 #include "multimodal_inference.grpc.pb.h"
 

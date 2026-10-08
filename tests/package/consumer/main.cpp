@@ -6,6 +6,9 @@
 #include <AgentLoom/service/gateway/gateway_lifecycle.h>
 #include <AgentLoom/service/gateway/gateway_routing.h>
 #include <AgentLoom/service/persona/persona_interaction.h>
+#include <AgentLoom/llm/llm_client.h>
+#include <AgentLoom/llm/llm_protocol.h>
+#include <AgentLoom/llm/openai_llm_client.h>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -75,6 +78,22 @@ bool VerifyInstalledWebSocketUpgrade() {
 }
 
 int main() {
+    // 新公共入口与旧 Provider 入口必须可并存；协议在安装包中可直接链接与调用。
+    const agent::llm::ChatCompletionsProtocol protocol;
+    agent::llm::ChatCompletionRequest llm_request;
+    llm_request.messages.push_back({agent::llm::ChatRole::User, "SDK protocol check"});
+    auto encoded = protocol.EncodeRequest(llm_request, {"sdk-model", {}});
+    if (!encoded.ok() || protocol.Endpoint() != "chat/completions" ||
+        encoded.value().find("sdk-model") == std::string::npos ||
+        !agent::llm::ValidateChatCompletionRequest(llm_request).ok()) {
+        return 9;
+    }
+    auto protocol_logger = core::LoggerAdapter::ForModule("sdk-consumer");
+    auto decoded = protocol.DecodeResponse(
+        R"({"choices":[{"message":{"content":"SDK reply"}}]})",
+        llm_request, {}, protocol_logger);
+    if (!decoded.ok() || decoded.value().content != "SDK reply") return 10;
+
     core::BucketMemoryPool pool;
     auto block = pool.allocate(256);
     if (!block.ok() || block.value().size() != 256) {

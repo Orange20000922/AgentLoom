@@ -1,5 +1,44 @@
 # LLM 协议解耦与对话 Streaming 设计（2026-10）
 
+> 阶段 1–2：公共接口与 Chat Completions 协议抽取已实现；其余阶段仍按下文方案逐步评审。
+
+## 当前协议实现边界
+
+`src/llm/llm_client.h` 统一声明公共 DTO、`ILlmClient` / `IAsyncLlmClient`、取消句柄、
+通用响应校验选项、Fallback 和 PromptStore。保留既有 `Chat*` 类型名及
+`ValidateChatCompletionRequest`；`openai_llm_client.h` 继续包含公共入口，旧消费者无需更名。
+Persona、Memory、Document、Skill、CloudTask 和 LocalLlm 已直接依赖公共入口。
+
+`src/llm/llm_protocol.h/.cpp` 提供 `ILlmProtocol` 与无请求级状态的 `ChatCompletionsProtocol`：
+
+| 方法 | 当前职责 |
+| --- | --- |
+| `Endpoint()` | 提供相对 base URL 的 endpoint |
+| `Capabilities()` | 声明线协议可表达的工具、图片、reasoning 字段能力；不证明 Provider/模型支持 |
+| `ValidateRequest()` | 工具声明、批次关联及当前不支持 streaming 的拒绝校验 |
+| `EncodeRequest()` | 返回拥有独立存储的完整请求 body，保留原 JSON 序列化参数与字段布局 |
+| `DecodeResponse()` | 解析成功响应 body，保留 UTF-8、结束状态、工具调用、usage 与 token audit 校验 |
+| `CreateStreamDecoder()` | 逐请求 decoder 的扩展入口；当前返回 `Unimplemented`，尚未实现 streaming |
+
+协议接口不引用 HTTP DTO 或 I/O runtime。HTTP 客户端保留认证、超时、HTTP status 错误映射、
+同步/异步传输、重试和取消。非 200 响应在客户端映射成原有 `core::Status`，不交给协议解码。
+默认客户端仍选择 `ChatCompletionsProtocol`，注入示例：
+
+```cpp
+auto protocol = std::make_shared<const agent::llm::ChatCompletionsProtocol>();
+agent::llm::OpenAiLlmClientOptions options;
+options.base_url = provider_base_url;
+options.api_key = provider_api_key;
+options.protocol = protocol;  // 同步和异步 Create 均使用该字段。
+```
+
+共享对象必须保持逻辑不可变；所有方法不得保存传入视图。新协议的 decoder 必须为每个请求独立创建。
+`reasoning_content` 字段仍原样透传，不转换成可见回答；其他协议的专属 continuation 尚未引入。
+本阶段保持原运行行为，没有 Responses、DSML、SSE、托管会话或工具循环预算实现。
+
+验证入口：`llm_protocol_test.cpp` 固定请求字节与结果字段、校验拒绝、HTTP 状态分工及协议注入；
+`llm_integration_e2e_test.cpp` 覆盖真实同步/异步 HTTP 的协议替换；安装包 consumer 覆盖新旧头文件共存及协议调用。
+公共源码接口保持旧入口，`OpenAiLlmClientOptions` 增加协议字段，SDK 与消费者需一起重编译。
 
 
 ## 1. 现状与可复用模块
@@ -28,7 +67,7 @@ Session admission / deferred lane
 - `IPersonaInteraction::CancelTurn` 按 Session 接纳异步 Turn 取消，已有 LLM 句柄可主动取消；无句柄的 Provider 阶段等待回调收口；
 - `core::Status` / `Result`、logger 及已有用量契约。
 
-当前缺口：
+重构前的缺口（前两项已在当前实现中解决）：
 
 | 边界 | 当前实现 | 影响 |
 | --- | --- | --- |
@@ -202,8 +241,8 @@ L3 长期事实、RAG 语料和 Skill 生命周期保持独立职责。
 | 阶段 | 主要变更 | 必要验证 |
 | --- | --- | --- |
 | 0：参考 Gateway 接线（已实现） | factory/coordinator 注入及默认组装 | 同步/异步工具 follow-up、未注册错误、真实 HTTP 闭环 |
-| 1：公共接口抽离 | 公共 DTO/client/operation 与具体 Provider 头文件分离 | 现有客户端、Persona、Memory、Document、Skill 行为回归及 SDK consumer 构建 |
-| 2：协议实现抽离 | Chat Completions 编解码改为协议多态，同步/异步共用 | 请求线格式、校验、错误、UTF-8、工具关联和用量回归 |
+| 1：公共接口抽离（已实现） | 公共 DTO/client/operation 与具体 Provider 头文件分离 | 现有客户端、Persona、Memory、Document、Skill 行为回归及 SDK consumer 构建 |
+| 2：协议实现抽离（已实现） | Chat Completions 编解码改为协议多态，同步/异步共用 | 请求线格式、校验、错误、UTF-8、工具关联和用量回归 |
 | 3：出站流式基础 | 增量 HTTP、SSE framing、Chat Completions decoder | 任意分块、跨 UTF-8、CRLF/多行事件、损坏输入、缺失终态、取消、deadline |
 | 4：端到端 streaming | Persona/Interaction sink、Gateway 事件输出 | 首片段可见、慢客户端、断开、工具中间文本、同 Session 保序、单次 commit |
 | 5：Responses 适配 | 新协议实现、output item/reasoning/工具结果映射 | 实际 Provider 能力、完整与流式协议一致性、旧协议回归 |
@@ -235,4 +274,4 @@ HTTP SSE 若同时需要，应单独核实入站 Server 的分块发送与关闭
 6. 多轮工具循环是否与首期 streaming 同时交付？建议先保证已有两轮闭环可流式运行，再独立扩展循环预算。
 7. Responses 的上游会话状态是否独立验收？建议保持独立，避免协议切换同时改变上下文来源。
 
-这些决策冻结后再细化具体头文件、接口签名与阶段工作量。本稿不引入新的生产协议实现。
+阶段 1–2 的实际接口见文首；后续 streaming 事件、提交和上游状态决策仍需独立评审。

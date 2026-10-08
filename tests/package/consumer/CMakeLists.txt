@@ -13,6 +13,7 @@ add_executable(agentloom_package_consumer
 target_compile_features(agentloom_package_consumer PRIVATE cxx_std_20)
 target_link_libraries(agentloom_package_consumer PRIVATE
     AgentLoom::core
+    AgentLoom::llm
     AgentLoom::bert_proto
     AgentLoom::grpc_runtime
     AgentLoom::gateway

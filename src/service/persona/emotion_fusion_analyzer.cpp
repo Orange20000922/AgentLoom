@@ -1,7 +1,7 @@
 #include "emotion_fusion_analyzer.h"
 
 #include "embedding_pipeline.h"
-#include "openai_llm_client.h"
+#include "llm_client.h"
 
 #include <nlohmann/json.hpp>
 

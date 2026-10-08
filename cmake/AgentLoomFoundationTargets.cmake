@@ -140,6 +140,10 @@ endif()
 
 # ──────────── LLM client (OpenAI-compatible) ────────────
 add_library(agent_llm STATIC
+    src/llm/llm_client.h
+    src/llm/llm_client.cpp
+    src/llm/llm_protocol.h
+    src/llm/llm_protocol.cpp
     src/llm/openai_llm_client.h
     src/llm/openai_llm_client.cpp
     src/llm/cloud_task_coordinator.h
@@ -167,6 +171,7 @@ endif()
 
 if(BERT_BUILD_TESTS)
     add_executable(llm_tests
+        tests/llm/llm_protocol_test.cpp
         tests/llm/openai_llm_client_test.cpp
         tests/llm/cloud_task_coordinator_test.cpp
     )

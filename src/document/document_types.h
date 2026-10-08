@@ -1,7 +1,7 @@
 #pragma once
 
 #include "result.h"
-#include "openai_llm_client.h"
+#include "llm_client.h"
 #include "isemantic_cache.h"
 
 #include <cstdint>
