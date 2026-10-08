@@ -158,6 +158,23 @@ dependencies.report_evaluator = std::make_shared<CommercialReportEvaluator>(/* .
 
 ## 5. 本地配置
 
+### Persona Turn 取消
+
+下游通过 `IPersonaInteraction::CancelTurn(PersonaSessionQuery)` 按 Session 请求取消当前异步 Turn。
+`trusted_user_uuid` 沿用 Session owner 校验；`trace_id` 是取消请求的 trace，不等于原 Turn trace。
+返回 OK 表示取消请求已接纳，原提交 callback 在在途 Provider 回调收口后恰好返回一次 `Cancelled`；
+重复请求在 Turn 仍在途时返回 OK，收口后无当前 Turn 返回 `NotFound`。排队中的后续 Turn 不受影响。
+
+```cpp
+auto status = interaction.CancelTurn({session_id, cancel_trace_id, authenticated_user_uuid});
+```
+
+LLM 请求通过原有 `IAsyncLlmOperation::Cancel()` 主动取消；emotion、memory 和工具 coordinator
+尚无通用取消句柄，需等待已接纳回调，再阻止后续阶段和 Session 提交。
+取消不回滚已经发生的工具副作用或记忆写入，不关闭 Session；同步 LLM 路径不提供该异步取消能力。
+Runtime 的操作索引在整个异步 Turn 生命周期内保留 Session，工具 follow-up 的句柄单独登记并安全清理。
+SDK 与消费者需一起重编译，自行实现 `IPersonaInteraction` 的下游需实现新增 `CancelTurn`。
+
 机器相关配置不进入 Git：
 
 ```text

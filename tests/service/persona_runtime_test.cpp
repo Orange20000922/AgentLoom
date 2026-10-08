@@ -1,4 +1,5 @@
 #include "persona_runtime.h"
+#include "persona_interaction.h"
 #include "gateway_session_affinity_scheduler.h"
 #include "runtime_maintenance_service.h"
 #include "skill_session_manager.h"
@@ -324,6 +325,12 @@ public:
             pending_.push_back(pending);
         }
         condition_.notify_all();
+        if (before_return) before_return(Count());
+        if (immediate_first_tool && Count() == 1) {
+            ChatCompletionResponse response;
+            response.tool_calls.push_back({"immediate-call", "vision_observe", "{}"});
+            pending->Finish(std::move(response));
+        }
         return std::shared_ptr<agent::llm::IAsyncLlmOperation>(
             std::make_shared<Operation>(pending));
     }
@@ -377,6 +384,9 @@ public:
         std::lock_guard lock(mutex_);
         return pending_.size();
     }
+
+    std::function<void(std::size_t)> before_return;
+    bool immediate_first_tool = false;
 
 private:
     mutable std::mutex mutex_;
@@ -930,6 +940,174 @@ TEST(PersonaRuntimeTest, ShutdownCancelsInflightAsyncLlmAndReleasesTurnLane) {
     io.Shutdown(true);
     compute.Shutdown(true);
 }
+
+TEST(PersonaRuntimeTest, CancelAsyncTurnBySessionCancelsCurrentTurnAndReleasesLane) {
+    core::ThreadPool compute({1, 16, "runtime-cancel-compute"});
+    core::ThreadPool io({1, 16, "runtime-cancel-io"});
+    core::ThreadPool llm_pool({1, 16, "runtime-cancel-llm",
+                               std::make_shared<GatewaySessionAffinityScheduler>()});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    ASSERT_TRUE(llm_pool.Start().ok());
+    SessionManager sessions(compute, io, {}, core::LoggerAdapter::ForModule("service"), &llm_pool);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto another = MakeSessionRequest();
+    another.session_id = "session-other";
+    ASSERT_TRUE(sessions.CreateSession(std::move(another)).ok());
+
+    auto async_llm = std::make_shared<ManualAsyncLlmClient>();
+    PersonaRuntime runtime(
+        sessions,
+        std::make_shared<SemanticMemoryContextProvider>(std::make_shared<FakeSemanticCache>()),
+        std::make_shared<NeutralEmotionAnalyzer>(),
+        std::make_shared<FakeLlmClient>(),
+        PersonaRuntimeOptions{.default_model = "test-model"},
+        nullptr, nullptr, nullptr, core::LoggerAdapter::ForModule("service"), nullptr, async_llm);
+
+    std::promise<core::Result<ChatResponse>> completed;
+    auto future = completed.get_future();
+    ChatRequest request;
+    request.session_id = "session-runtime";
+    request.trace_id = "trace-runtime-cancel";
+    request.user_input = "cancel by session";
+    ASSERT_TRUE(runtime.SubmitChat(std::move(request), [&completed](auto result) {
+        completed.set_value(std::move(result));
+    }).ok());
+    ASSERT_TRUE(async_llm->WaitForCount(1, std::chrono::seconds(1)));
+
+    std::promise<core::Result<ChatResponse>> other_done;
+    auto other_future = other_done.get_future();
+    ChatRequest other;
+    other.session_id = "session-other";
+    other.user_input = "keep this session running";
+    ASSERT_TRUE(runtime.SubmitChat(other, [&other_done](auto result) {
+        other_done.set_value(std::move(result));
+    }).ok());
+    ASSERT_TRUE(async_llm->WaitForCount(2, std::chrono::seconds(1)));
+
+    ASSERT_TRUE(runtime.CancelAsyncTurn("session-runtime", "trace-runtime-cancel").ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), core::ErrorCode::Cancelled);
+    EXPECT_EQ(runtime.CancelAsyncTurn("session-runtime").code(), core::ErrorCode::NotFound);
+    EXPECT_EQ(sessions.GetSessionSnapshot("session-runtime").value().recent_turn_count, 0u);
+    EXPECT_EQ(other_future.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    async_llm->Complete(1, "other success");
+    ASSERT_EQ(other_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(other_future.get().ok());
+
+    // 原 Session 保持 Active，取消收口后可继续执行下一 Turn。
+    std::promise<core::Result<ChatResponse>> next_done;
+    auto next_future = next_done.get_future();
+    other.session_id = "session-runtime";
+    ASSERT_TRUE(runtime.SubmitChat(other, [&next_done](auto result) {
+        next_done.set_value(std::move(result));
+    }).ok());
+    ASSERT_TRUE(async_llm->WaitForCount(3, std::chrono::seconds(1)));
+    async_llm->Complete(2, "next success");
+    ASSERT_EQ(next_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    ASSERT_TRUE(next_future.get().ok());
+    EXPECT_EQ(sessions.GetSessionSnapshot("session-runtime").value().recent_turn_count, 1u);
+
+    runtime.Shutdown();
+    sessions.Shutdown();
+    llm_pool.Shutdown(true);
+    io.Shutdown(true);
+    compute.Shutdown(true);
+}
+
+// 逐阶段覆盖公共取消入口，Provider 等待期间保留 lane 与 Runtime 生命周期。
+class PersonaTurnCancellationTest : public testing::TestWithParam<int> {};
+
+TEST_P(PersonaTurnCancellationTest, CancelsAtProviderBoundariesThroughInteraction) {
+    core::ThreadPool compute({1, 16, "cancel-boundary-compute"});
+    core::ThreadPool io({1, 16, "cancel-boundary-io"});
+    core::ThreadPool lane({1, 16, "cancel-boundary-turn",
+                           std::make_shared<GatewaySessionAffinityScheduler>()});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    ASSERT_TRUE(lane.Start().ok());
+    SessionManager sessions(compute, io, {}, core::LoggerAdapter::ForModule("service"), &lane);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto async_llm = std::make_shared<ManualAsyncLlmClient>();
+    auto emotion = std::make_shared<ManualAsyncEmotionAnalyzer>();
+    auto memory = std::make_shared<ManualMemoryContextProvider>();
+    auto tool_memory = std::make_shared<FakeToolMemoryProvider>();
+    tool_memory->tools.push_back({"vision_observe", "observe", R"({"type":"object"})"});
+    auto coordinator = std::make_shared<DeferredToolCallCoordinator>();
+    const auto stage = GetParam();
+    std::shared_ptr<agent::service::persona::IMemoryContextProvider> memory_provider =
+        std::make_shared<SemanticMemoryContextProvider>(std::make_shared<FakeSemanticCache>());
+    if (stage == 1) memory_provider = memory;
+    std::shared_ptr<agent::service::persona::IEmotionAnalyzer> emotion_provider =
+        std::make_shared<NeutralEmotionAnalyzer>();
+    if (stage == 0) emotion_provider = emotion;
+    PersonaRuntime runtime(sessions, memory_provider, emotion_provider,
+        std::make_shared<FakeLlmClient>(), PersonaRuntimeOptions{.default_model = "test"},
+        nullptr, tool_memory, nullptr, core::LoggerAdapter::ForModule("test"),
+        nullptr, async_llm, nullptr, coordinator);
+    agent::service::persona::PersonaInteraction interaction(sessions, runtime);
+    agent::service::persona::IPersonaInteraction& api = interaction;
+    std::atomic<int> callbacks{0};
+    std::promise<core::Result<ChatResponse>> completed;
+    auto future = completed.get_future();
+    core::Status cancel_status;
+    auto cancel = [&] {
+        // 取消请求有自己的 trace，不必与原请求相同；非 owner 不能取消。
+        EXPECT_EQ(api.CancelTurn({"session-runtime", "cancel-denied", "other-user"}).code(),
+                  core::ErrorCode::PermissionDenied);
+        cancel_status = api.CancelTurn({"session-runtime", "cancel-trace", "user-runtime"});
+        EXPECT_TRUE(cancel_status.ok()) << cancel_status.message();
+    };
+    if (stage == 3) async_llm->before_return = [&](std::size_t) { cancel(); };
+    if (stage == 4) async_llm->immediate_first_tool = true;
+    agent::service::persona::PersonaTurnRequest turn;
+    turn.trusted_user_uuid = "user-runtime";
+    turn.turn.session_id = "session-runtime";
+    turn.turn.trace_id = "original-trace";
+    turn.turn.user_input = "use tool";
+    ASSERT_TRUE(api.SubmitTurn(std::move(turn), [&](auto result) {
+        if (callbacks.fetch_add(1) == 0) completed.set_value(std::move(result));
+    }).ok());
+    if (stage == 0) {
+        ASSERT_TRUE(emotion->WaitForCount(1));
+        cancel();
+        EXPECT_EQ(future.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        emotion->Complete(0, MakeEmotion("neutral", 0.1));
+    } else if (stage == 1) {
+        ASSERT_TRUE(memory->WaitUntilPending());
+        cancel();
+        EXPECT_EQ(future.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        memory->Complete(agent::service::persona::RecalledContext{});
+    } else if (stage == 2 || stage == 4) {
+        ASSERT_TRUE(async_llm->WaitForCount(1, std::chrono::seconds(1)));
+        if (stage == 2) async_llm->CompleteWithToolCall(0, "tool-call", "vision_observe", "{}");
+        ASSERT_TRUE(coordinator->WaitUntilPending(std::chrono::seconds(1)));
+        if (stage == 2) {
+            cancel();
+            coordinator->CompletePending();
+            EXPECT_EQ(async_llm->Count(), 1u); // 已取消的工具结果不得发起 follow-up。
+        } else {
+            coordinator->CompletePending();
+            ASSERT_TRUE(async_llm->WaitForCount(2, std::chrono::seconds(1)));
+            cancel(); // 首轮同步 callback 清理不得擦除 follow-up 的句柄索引。
+        }
+    }
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(future.get().status().code(), core::ErrorCode::Cancelled);
+    EXPECT_EQ(callbacks.load(), 1);
+    EXPECT_EQ(sessions.GetSessionSnapshot("session-runtime").value().recent_turn_count, 0u);
+    EXPECT_EQ(api.CancelTurn({"session-runtime", {}, "user-runtime"}).code(),
+              core::ErrorCode::NotFound);
+    runtime.Shutdown();
+    sessions.Shutdown();
+    lane.Shutdown(true);
+    io.Shutdown(true);
+    compute.Shutdown(true);
+}
+
+INSTANTIATE_TEST_SUITE_P(ProviderStages, PersonaTurnCancellationTest, testing::Values(0, 1, 2, 3, 4));
 
 TEST(PersonaRuntimeTest, ShutdownWaitsForAcceptedAsyncMemoryContinuation) {
     core::ThreadPool compute({1, 32, "runtime-memory-shutdown-compute"});

@@ -105,6 +105,10 @@ struct PersonaGatewayServerDependencies {
     std::shared_ptr<IPersonaMetadataStore> persona_metadata_store;
     std::shared_ptr<IReportEvaluator> report_evaluator;
     std::vector<std::shared_ptr<IRuntimeMaintenanceTask>> maintenance_tasks;
+    /// 下游注册业务执行器；未提供时使用空工厂，未注册调用回填结构化错误。
+    std::shared_ptr<const agent::skill::ISkillExecutorFactory> skill_executor_factory;
+    /// 可选的自定义协调器，优先于 registry/factory/session 的默认装配。
+    std::shared_ptr<agent::skill::ISkillToolCallCoordinator> skill_tool_coordinator;
 };
 
 class PersonaGatewayServer final {

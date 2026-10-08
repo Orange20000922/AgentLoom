@@ -168,7 +168,24 @@ auto invocation = std::make_shared<agent::skill::SkillInvocationService>(registr
 auto coordinator = std::make_shared<agent::skill::SkillToolCallCoordinator>(registry, invocation);
 ```
 
-生产主链路（`agent_gateway_server`）在启动时完成上述装配：`skill_registry` 从 `config.skill_manifests` 注册，`dependencies.tool_memory_provider` 由 L4 种子写入 + `VectorToolMemoryProvider` 构造（空 `skills.tool_memory_sqlite_path` 则跳过），`dependencies.skill_registry` / `skill_session_manager` 一并注入 `PersonaGatewayServerDependencies`。
+生产主链路（`agent_gateway_server`）从 `config.skill_manifests` 注册 `skill_registry`，
+`dependencies.tool_memory_provider` 由 L4 种子写入 + `VectorToolMemoryProvider` 构造
+（空 `skills.tool_memory_sqlite_path` 则跳过），并注入 `skill_registry` / `skill_session_manager`。
+参考 Gateway 在这两个依赖齐全时自动创建 `SkillInvocationService` / `SkillToolCallCoordinator`
+并注入 Persona Runtime，同步与异步工具 follow-up 共享该闭环。
+
+下游通过 `PersonaGatewayServerDependencies::skill_executor_factory` 注入已注册业务执行器的工厂；
+也可直接提供 `skill_tool_coordinator` 覆盖默认装配。未提供工厂时使用空工厂，未注册执行器的调用
+向 LLM 回填结构化错误，不代表已经实现 CRM、RAG 等业务工具。未装配 Registry 或 Skill Session
+且未提供自定义 coordinator 时，保留无工具协调器的运行方式；孤立的 factory 会在启动时被拒绝。
+
+```cpp
+agent::service::gateway::PersonaGatewayServerDependencies dependencies;
+dependencies.skill_registry = registry;
+dependencies.skill_executor_factory = factory;  // 已注册业务执行器的工厂。
+dependencies.skill_session_manager = sessions;
+// 其余 Memory / Emotion / LLM 依赖按正常流程设置；Server 自动组装 coordinator。
+```
 
 ### 5.2 复杂逻辑：直接接入 Skill 会话状态机
 

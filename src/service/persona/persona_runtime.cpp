@@ -1,5 +1,4 @@
 #include "persona_runtime.h"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -9,14 +8,11 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
-
 namespace agent::service::persona {
 namespace {
-
 std::string FormatRecentTurn(const ConversationTurn& turn) {
     return "用户: " + turn.user_input + "\n助手: " + turn.response;
 }
-
 std::string FormatL3Facts(const std::vector<vector_storage::EntryRecord>& facts) {
     if (facts.empty()) {
         return {};
@@ -30,12 +26,10 @@ std::string FormatL3Facts(const std::vector<vector_storage::EntryRecord>& facts)
     out += "</memory_l3>";
     return out;
 }
-
 std::chrono::milliseconds Since(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
 }
-
 GenerationParams ApplyEmotionAdaptiveGeneration(const GenerationParams& base,
                                                 const EmotionAnalysis& emotion,
                                                 const EmotionGenerationOptions& options) {
@@ -55,7 +49,6 @@ GenerationParams ApplyEmotionAdaptiveGeneration(const GenerationParams& base,
     adjusted.max_tokens = std::clamp(adaptive_tokens, minimum, maximum);
     return adjusted;
 }
-
 core::Status ValidateEmotionGenerationOptions(const EmotionGenerationOptions& options) {
     if (options.default_generation.max_tokens <= 0 || options.min_tokens <= 0 ||
         !std::isfinite(options.max_token_ratio) || options.max_token_ratio < 1.0 ||
@@ -77,7 +70,6 @@ core::Status ValidateEmotionGenerationOptions(const EmotionGenerationOptions& op
     }
     return core::Status::Ok();
 }
-
 std::vector<ConversationTurn> TakeRecent(std::span<const ConversationTurn> turns, std::size_t limit) {
     std::vector<ConversationTurn> out;
     const auto count = std::min<std::size_t>(turns.size(), limit);
@@ -88,14 +80,12 @@ std::vector<ConversationTurn> TakeRecent(std::span<const ConversationTurn> turns
     }
     return out;
 }
-
 /// 将 provider 的同步完成、异步完成和异常实现统一收敛为一次外部结果。
 class MemoryBuildCompletionState final {
 public:
     explicit MemoryBuildCompletionState(
         IAsyncMemoryContextProvider::BuildCompletion completion)
         : completion_(std::move(completion)) {}
-
     bool TryComplete(core::Result<RecalledContext> result) {
         bool expected = false;
         if (!completed_.compare_exchange_strong(
@@ -107,25 +97,21 @@ public:
         completion(std::move(result));
         return true;
     }
-
     bool CancelWithoutCompletion() noexcept {
         bool expected = false;
         return completed_.compare_exchange_strong(
             expected, true, std::memory_order_acq_rel);
     }
-
 private:
     std::atomic<bool> completed_{false};
     IAsyncMemoryContextProvider::BuildCompletion completion_;
 };
-
 bool IsProactiveInput(std::string_view input) {
     return input.rfind("[proactive]", 0) == 0 ||
            input.rfind("[proactive_decision]", 0) == 0 ||
            input.rfind("conversation idle for ", 0) == 0 ||
            input.rfind("[system_event]", 0) == 0;
 }
-
 double TopProbabilityMargin(const EmotionInfo& emotion) {
     if (emotion.probabilities.size() < 2) {
         return 1.0;
@@ -145,7 +131,6 @@ double TopProbabilityMargin(const EmotionInfo& emotion) {
     }
     return first - second;
 }
-
 std::optional<std::string> EmotionCalibrationReason(const EmotionAnalysis& emotion,
                                                     const EmotionCalibrationOptions& options) {
     if (emotion.emotion.primary_prob < options.low_confidence_threshold) {
@@ -157,7 +142,6 @@ std::optional<std::string> EmotionCalibrationReason(const EmotionAnalysis& emoti
     }
     return std::nullopt;
 }
-
 std::string SkillStateName(SkillSessionState state) {
     switch (state) {
     case SkillSessionState::Idle:
@@ -181,7 +165,6 @@ std::string SkillStateName(SkillSessionState state) {
     }
     return "unknown";
 }
-
 std::string FormatSkillPromptBlock(const SkillSessionSnapshot& snapshot) {
     if (!snapshot.last_observation.empty() && snapshot.state == SkillSessionState::Running) {
         return "<skill_observation skill=\"" + snapshot.skill_id + "\">\n"
@@ -199,9 +182,7 @@ std::string FormatSkillPromptBlock(const SkillSessionSnapshot& snapshot) {
     out += "\n</skill_status>";
     return out;
 }
-
 } // namespace
-
 SemanticMemoryContextProvider::SemanticMemoryContextProvider(
     std::shared_ptr<semantic_cache::ISemanticCache> l0_cache,
     std::shared_ptr<memory::LongTermMemoryCompressor> l3_memory,
@@ -209,7 +190,6 @@ SemanticMemoryContextProvider::SemanticMemoryContextProvider(
     : l0_cache_(std::move(l0_cache)),
       l3_memory_(std::move(l3_memory)),
       options_(options) {}
-
 core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
     const MemoryContextRequest& request) {
     RecalledContext context;
@@ -217,7 +197,6 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
         ? options_.max_recent_turns
         : request.max_recent_turns;
     context.recent_turns = TakeRecent(request.current_session_recent, recent_limit);
-
     std::vector<std::string> sections;
     if (l0_cache_) {
         semantic_cache::CacheLookupRequest lookup;
@@ -233,7 +212,6 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
         for (const auto& turn : context.recent_turns) {
             lookup.recent_turns.push_back(FormatRecentTurn(turn));
         }
-
         auto l0 = l0_cache_->Lookup(lookup);
         if (!l0.ok()) {
             return l0.status();
@@ -243,7 +221,6 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
             sections.push_back("<memory_l0>\n" + l0.value().payload + "\n</memory_l0>");
         }
     }
-
     if (l3_memory_) {
         auto facts = l3_memory_->SearchFacts(
             {request.tenant_id, request.user_uuid}, request.query, options_.l3_top_k);
@@ -256,7 +233,6 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
             sections.push_back(std::move(formatted));
         }
     }
-
     for (std::size_t i = 0; i < sections.size(); ++i) {
         if (i != 0) {
             context.system_context += "\n";
@@ -265,7 +241,6 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
     }
     return context;
 }
-
 core::Status SemanticMemoryContextProvider::BuildContextAsync(
     AsyncMemoryContextRequest request,
     BuildCompletion completion) {
@@ -284,7 +259,6 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
     const auto l3_top_k = options_.l3_top_k;
     const auto user_uuid = request.user_uuid;
     const auto query = request.query;
-
     auto complete_remaining =
         [l3_memory, l3_top_k, tenant_id = request.tenant_id, user_uuid, query, completion_state](
             RecalledContext value) mutable {
@@ -314,7 +288,6 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
             }
             completion_state->TryComplete(std::move(value));
         };
-
     if (!l0_cache_) {
         complete_remaining(std::move(context));
         return core::Status::Ok();
@@ -333,7 +306,6 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
         completion_state->TryComplete(BuildContext(sync_request));
         return core::Status::Ok();
     }
-
     semantic_cache::CacheLookupRequest lookup;
     lookup.text = request.query;
     lookup.scope = semantic_cache::CacheScope::User;
@@ -347,7 +319,6 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
     for (const auto& turn : context.recent_turns) {
         lookup.recent_turns.push_back(FormatRecentTurn(turn));
     }
-
     core::Status start_status;
     try {
         start_status = async_l0->LookupAsync(
@@ -382,7 +353,6 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
     }
     return start_status;
 }
-
 core::Status SemanticMemoryContextProvider::AdmitTurnAsync(
     std::string session_id,
     std::string tenant_id,
@@ -405,7 +375,6 @@ core::Status SemanticMemoryContextProvider::AdmitTurnAsync(
             core::ErrorCode::FailedPrecondition,
             "asynchronous L0 memory admission is not supported");
     }
-
     semantic_cache::CacheStoreRequest store;
     store.origin.text = turn.user_input;
     store.origin.scope = semantic_cache::CacheScope::User;
@@ -417,7 +386,6 @@ core::Status SemanticMemoryContextProvider::AdmitTurnAsync(
     store.origin.extra["trace_id"] = std::move(trace_id);
     store.response_payload = turn.response;
     store.answer_type = semantic_cache::AnswerType::Personalized;
-
     auto completion_state = std::make_shared<std::atomic<bool>>(false);
     auto guarded_completion = [completion = std::move(completion), completion_state,
                                l3_memory = l3_memory_, owner](
@@ -536,13 +504,24 @@ struct PersonaRuntime::AsyncTurnOperation final {
     }
 
     bool Transition(AsyncTurnPhase expected, AsyncTurnPhase next) noexcept {
+        if (cancel_requested->load(std::memory_order_acquire)) {
+            Finish(core::Status::Error(core::ErrorCode::Cancelled,
+                                      "persona turn cancelled by caller"));
+            return false;
+        }
         return phase.compare_exchange_strong(
             expected, next, std::memory_order_acq_rel);
     }
 
     void Finish(core::Result<SessionTurnCommit> result) noexcept {
-        if (finished.exchange(true, std::memory_order_acq_rel)) {
-            return;
+        {
+            // Cancel 与最终提交共用短锁，取消先被接纳时不能再提交成功结果。
+            std::lock_guard lock(completion_mutex);
+            if (finished.exchange(true, std::memory_order_acq_rel)) return;
+            if (cancel_requested->load(std::memory_order_acquire)) {
+                result = core::Status::Error(core::ErrorCode::Cancelled,
+                                            "persona turn cancelled by caller");
+            }
         }
         phase.store(result.ok() ? AsyncTurnPhase::Completed : AsyncTurnPhase::Failed,
                     std::memory_order_release);
@@ -565,7 +544,7 @@ struct PersonaRuntime::AsyncTurnOperation final {
 
     void ReleaseRuntimeLease() noexcept {
         if (owner && armed.exchange(false, std::memory_order_acq_rel)) {
-            owner->FinishAsyncTurnOperation();
+            owner->FinishAsyncTurnOperation(*this);
         }
     }
 
@@ -584,6 +563,9 @@ struct PersonaRuntime::AsyncTurnOperation final {
     std::atomic<AsyncTurnPhase> phase{AsyncTurnPhase::Admitted};
     std::atomic<bool> finished{false};
     std::atomic<bool> armed{false};
+    std::mutex completion_mutex;
+    std::shared_ptr<std::atomic<bool>> cancel_requested =
+        std::make_shared<std::atomic<bool>>(false);
     core::LoggerAdapter logger;
 };
 
@@ -622,6 +604,49 @@ PersonaRuntime::PersonaRuntime(SessionManager& sessions,
 
 PersonaRuntime::~PersonaRuntime() {
     Shutdown();
+}
+
+core::Status PersonaRuntime::CancelAsyncTurn(std::string_view session_id,
+                                             std::string_view trace_id) {
+    if (session_id.empty()) {
+        return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                   "session_id is required");
+    }
+    std::shared_ptr<llm::IAsyncLlmOperation> llm_operation;
+    std::shared_ptr<AsyncTurnOperation> turn_operation;
+    {
+        std::lock_guard lock(async_operations_mutex_);
+        auto turn = async_turns_by_session_.find(std::string(session_id));
+        if (turn != async_turns_by_session_.end()) turn_operation = turn->second.lock();
+        if (!turn_operation) {
+            return core::Status::Error(core::ErrorCode::NotFound,
+                                       "no async turn is active for session");
+        }
+        if (!trace_id.empty() && turn_operation->request.trace_id != trace_id) {
+            return core::Status::Error(core::ErrorCode::NotFound,
+                                       "trace_id does not identify the active turn");
+        }
+        {
+            std::lock_guard completion_lock(turn_operation->completion_mutex);
+            if (turn_operation->finished.load(std::memory_order_acquire)) {
+                return core::Status::Error(core::ErrorCode::NotFound, "async turn already completed");
+            }
+            turn_operation->cancel_requested->store(true, std::memory_order_release);
+        }
+        auto index = async_operation_by_session_.find(std::string(session_id));
+        if (index != async_operation_by_session_.end()) {
+            auto operation = async_operations_.find(index->second);
+            if (operation != async_operations_.end() &&
+                operation->second.trace_id == turn_operation->request.trace_id) {
+                llm_operation = operation->second.llm_operation;
+            }
+        }
+    }
+    // 不持 Runtime 锁调用 Provider：Cancel 允许同步触发完成回调。
+    if (llm_operation) {
+        llm_operation->Cancel();
+    }
+    return core::Status::Ok();
 }
 
 core::Status PersonaRuntime::SubmitChat(ChatRequest request, ChatCallback callback) {
@@ -1165,6 +1190,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "async chat completion callback is required");
     }
+    if (prepared.cancel_requested && prepared.cancel_requested->load(std::memory_order_acquire)) {
+        return core::Status::Error(core::ErrorCode::Cancelled, "persona turn cancelled by caller");
+    }
     const auto io_stage_start = std::chrono::steady_clock::now();
     std::optional<AnswerCacheLookupRequest> answer_cache_lookup;
     if (answer_cache_provider_) {
@@ -1218,7 +1246,13 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                                        "persona runtime is shutting down");
         }
         operation_id = next_async_operation_id_++;
-        async_operations_.emplace(operation_id, nullptr);
+        async_operations_.emplace(operation_id, AsyncOperationRecord{
+            .session_id = prepared.request.session_id,
+            .trace_id = prepared.request.trace_id,
+            .llm_operation = nullptr,
+            .cancel_requested = prepared.cancel_requested,
+        });
+        async_operation_by_session_[prepared.request.session_id] = operation_id;
     }
     auto submitted = async_llm_client_->CompleteAsync(
         std::move(request),
@@ -1233,7 +1267,14 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                 ~OperationCleanup() {
                     {
                         std::lock_guard lock(runtime->async_operations_mutex_);
-                        runtime->async_operations_.erase(id);
+                        auto it = runtime->async_operations_.find(id);
+                        if (it != runtime->async_operations_.end()) {
+                            auto index = runtime->async_operation_by_session_.find(it->second.session_id);
+                            // 首轮同步回调可能已登记 follow-up，旧请求不能擦掉新句柄索引。
+                            if (index != runtime->async_operation_by_session_.end() && index->second == id)
+                                runtime->async_operation_by_session_.erase(index);
+                            runtime->async_operations_.erase(it);
+                        }
                     }
                     runtime->async_operations_drained_.notify_all();
                 }
@@ -1250,6 +1291,12 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                              completion = std::move(completion)]() mutable {
                 auto prepared_value = std::move(prepared);
                 prepared_value.latency.llm_total = Since(llm_started_at);
+                if (prepared_value.cancel_requested &&
+                    prepared_value.cancel_requested->load(std::memory_order_acquire)) {
+                    completion(core::Status::Error(core::ErrorCode::Cancelled,
+                                                  "persona turn cancelled by caller"));
+                    return;
+                }
                 if (!result_holder->ok()) {
                     completion(result_holder->status());
                     return;
@@ -1335,7 +1382,13 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
     if (!submitted.ok()) {
         {
             std::lock_guard lock(async_operations_mutex_);
-            async_operations_.erase(operation_id);
+            auto it = async_operations_.find(operation_id);
+            if (it != async_operations_.end()) {
+                auto index = async_operation_by_session_.find(it->second.session_id);
+                if (index != async_operation_by_session_.end() && index->second == operation_id)
+                    async_operation_by_session_.erase(index);
+                async_operations_.erase(it);
+            }
         }
         async_operations_drained_.notify_all();
         return submitted.status();
@@ -1349,8 +1402,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
             // callback 允许在 CompleteAsync 返回前同步完成，此时无需再保存句柄。
             return core::Status::Ok();
         }
-        operation->second = submitted.value();
-        cancel = async_stopping_;
+        operation->second.llm_operation = submitted.value();
+        cancel = async_stopping_ || (operation->second.cancel_requested &&
+            operation->second.cancel_requested->load(std::memory_order_acquire));
     }
     if (cancel) {
         submitted.value()->Cancel();
@@ -1378,6 +1432,7 @@ PersonaRuntime::BeginAsyncTurnOperation(
                                    "persona runtime is shutting down");
     }
     ++async_turn_operation_count_;
+    async_turns_by_session_[operation->session.session_id] = operation;
     operation->armed.store(true, std::memory_order_release);
     return operation;
 }
@@ -1567,6 +1622,7 @@ void PersonaRuntime::ContinueAsyncTurn(
         prepared.value().latency.compute_queue_wait = operation->compute_queue_wait;
         prepared.value().latency.compute_stage = Since(operation->compute_started_at);
         prepared.value().io_submitted_at = std::chrono::steady_clock::now();
+        prepared.value().cancel_requested = operation->cancel_requested;
         auto status = CompleteWithLlmAsync(
             operation->session,
             std::move(prepared).value(),
@@ -1721,11 +1777,16 @@ void PersonaRuntime::FinishAsyncCompletedChat(
     }
 }
 
-void PersonaRuntime::FinishAsyncTurnOperation() noexcept {
+void PersonaRuntime::FinishAsyncTurnOperation(const AsyncTurnOperation& operation) noexcept {
     {
         std::lock_guard lock(async_operations_mutex_);
         if (async_turn_operation_count_ > 0) {
             --async_turn_operation_count_;
+        }
+        auto turn = async_turns_by_session_.find(operation.session.session_id);
+        if (turn != async_turns_by_session_.end()) {
+            auto current = turn->second.lock();
+            if (!current || current.get() == &operation) async_turns_by_session_.erase(turn);
         }
     }
     async_operations_drained_.notify_all();
@@ -1741,9 +1802,9 @@ void PersonaRuntime::Shutdown() noexcept {
         }
         async_stopping_ = true;
         operations.reserve(async_operations_.size());
-        for (const auto& [_, operation] : async_operations_) {
-            if (operation) {
-                operations.push_back(operation);
+        for (const auto& [_, record] : async_operations_) {
+            if (record.llm_operation) {
+                operations.push_back(record.llm_operation);
             }
         }
     }
@@ -1800,6 +1861,9 @@ core::Status PersonaRuntime::FinalizeLlmCompletionAsync(
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "LLM finalization completion is required");
     }
+    if (prepared.cancel_requested && prepared.cancel_requested->load(std::memory_order_acquire)) {
+        return core::Status::Error(core::ErrorCode::Cancelled, "persona turn cancelled by caller");
+    }
     if (answer_cache_provider_ && answer_cache_lookup) {
         AnswerCacheStoreRequest store;
         store.lookup = std::move(*answer_cache_lookup);
@@ -1851,6 +1915,12 @@ core::Status PersonaRuntime::FinalizeLlmCompletionAsync(
                            emotion_holder = std::make_shared<core::Result<EmotionAnalysis>>(
                                std::move(emotion))]() mutable {
                 auto completion = std::move(std::get<3>(*state));
+                const auto& cancellation = std::get<1>(*state).cancel_requested;
+                if (cancellation && cancellation->load(std::memory_order_acquire)) {
+                    completion(core::Status::Error(core::ErrorCode::Cancelled,
+                                                  "persona turn cancelled by caller"));
+                    return;
+                }
                 if (!emotion_holder->ok()) {
                     completion(emotion_holder->status());
                     return;

@@ -13,7 +13,9 @@
       "Bash(Select-Object -First 50)",
       "Bash(vcpkg search *)",
       "WebFetch(domain:knightli.com)",
-      "Bash(\"/c/Program Files/CMake/bin/cmake.exe\" --build \"D:/Users/21405/source/repos/AgentBackendPredict/build/x64-Release-Tests-v145-refactor\" --target service_tests config_tests --config Release 2>&1 | tail -30)"
+      "Bash(\"/c/Program Files/CMake/bin/cmake.exe\" --build \"D:/Users/21405/source/repos/AgentBackendPredict/build/x64-Release-Tests-v145-refactor\" --target service_tests config_tests --config Release 2>&1 | tail -30)",
+      "Read(//d/Users/21405/source/repos/EnterpriseTrainingSystem/**)",
+      "Bash(git -C \"D:/Users/21405/source/repos/EnterpriseTrainingSystem\" log --format=\"%an <%ae>\")"
     ]
   }
 }

@@ -219,7 +219,7 @@ Configuration uses JSON sections with CLI overrides. Treat `src/config/sections/
 | Process | Example |
 | --- | --- |
 | Shared ConfigSection field reference | [`config.example.json`](config.example.json) |
-| Gateway | [`config/agent_gateway.example.json`](config/agent_gateway.example.json) |
+| Gateway | [`config.example.json`](config.example.json) |
 | Multimodal inference | [`config/server.example.json`](config/server.example.json) |
 | Container emotion inference | [`config/emotion.container.example.json`](config/emotion.container.example.json) |
 
@@ -229,8 +229,8 @@ Inject API keys and authentication tokens through environment variables or local
 # The current gateway entry uses the positional path for startup context and
 # --config for the shared configuration loader.
 build\x64-Release\Release\agent_gateway_server.exe `
-  config\agent_gateway.example.json `
-  --config config\agent_gateway.example.json `
+  config.example.json `
+  --config config.example.json `
   --no-stdin-stop
 
 build\x64-Release\Release\multimodal_inference_server.exe `

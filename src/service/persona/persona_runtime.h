@@ -10,6 +10,7 @@
 #include "tool_memory_provider.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -279,6 +280,11 @@ struct PersonaRuntimeOptions {
 
 class PersonaRuntime {
 public:
+    /// 请求取消当前异步 Turn；无在途 Turn 返回 NotFound。trace_id 可限定原 Turn。
+    /// 无取消句柄的 Provider 阶段等待回调后收口，不提前释放 lane 或 Runtime 生命周期。
+    core::Status CancelAsyncTurn(std::string_view session_id,
+                                 std::string_view trace_id = {});
+
     /// 组装 Persona 对话运行时。
     /// @param sessions 借用的会话管理器，生命周期必须长于 PersonaRuntime。
     /// @param memory_provider 记忆上下文 provider，SubmitChat 前必须非空。
@@ -325,6 +331,13 @@ private:
 
     struct AsyncTurnOperation;
 
+    struct AsyncOperationRecord {
+        std::string session_id;
+        std::string trace_id;
+        std::shared_ptr<llm::IAsyncLlmOperation> llm_operation;
+        std::shared_ptr<std::atomic<bool>> cancel_requested;
+    };
+
     struct PreparedChat {
         ChatRequest request;
         RecalledContext memory;
@@ -333,6 +346,7 @@ private:
         std::vector<llm::ChatMessage> messages;
         std::vector<llm::ChatCompletionRequest::Tool> tools;
         std::size_t tool_round = 0;
+        std::shared_ptr<std::atomic<bool>> cancel_requested;
         AnswerCacheInfo answer_cache;
         std::chrono::steady_clock::time_point started_at;
         std::chrono::steady_clock::time_point io_submitted_at;
@@ -422,7 +436,7 @@ private:
     void FinishAsyncCompletedChat(
         const std::shared_ptr<AsyncTurnOperation>& operation,
         CompletedChat completed) noexcept;
-    void FinishAsyncTurnOperation() noexcept;
+    void FinishAsyncTurnOperation(const AsyncTurnOperation& operation) noexcept;
 
     SessionManager& sessions_;
     std::shared_ptr<IMemoryContextProvider> memory_provider_;
@@ -442,7 +456,9 @@ private:
     core::LoggerAdapter logger_;
     mutable std::mutex async_operations_mutex_;
     std::condition_variable async_operations_drained_;
-    std::unordered_map<std::uint64_t, std::shared_ptr<llm::IAsyncLlmOperation>> async_operations_;
+    std::unordered_map<std::uint64_t, AsyncOperationRecord> async_operations_;
+    std::unordered_map<std::string, std::uint64_t> async_operation_by_session_;
+    std::unordered_map<std::string, std::weak_ptr<AsyncTurnOperation>> async_turns_by_session_;
     std::size_t async_turn_operation_count_ = 0;
     std::uint64_t next_async_operation_id_ = 1;
     bool async_stopping_ = false;

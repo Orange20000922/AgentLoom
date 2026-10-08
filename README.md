@@ -258,7 +258,7 @@ bash linux/scripts/verify_package.sh
 | 进程 | 配置样例 |
 | --- | --- |
 | 通用 ConfigSection 字段参考 | [`config.example.json`](config.example.json) |
-| Gateway | [`config/agent_gateway.example.json`](config/agent_gateway.example.json) |
+| Gateway | [`config.example.json`](config.example.json) |
 | Multimodal inference | [`config/server.example.json`](config/server.example.json) |
 | Container emotion inference | [`config/emotion.container.example.json`](config/emotion.container.example.json) |
 
@@ -267,8 +267,8 @@ API Key 和认证 token 应通过环境变量或本地文件注入，不要写�
 ```powershell
 # Gateway：当前入口同时使用位置参数定位工作目录，并由 --config 加载统一配置
 build\x64-Release\Release\agent_gateway_server.exe `
-  config\agent_gateway.example.json `
-  --config config\agent_gateway.example.json `
+  config.example.json `
+  --config config.example.json `
   --no-stdin-stop
 
 # Multimodal gRPC inference
