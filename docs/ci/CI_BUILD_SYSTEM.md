@@ -69,6 +69,26 @@ Faiss 和 Windows MKL 的 `.conda` 归档通过 `.github/scripts/extract-conda-p
 
 Linux 使用 Ninja 和 ccache；Windows 使用可用的 Visual Studio generator 和 sccache。两者使用各自的平台 cache key 和目录。
 
+### HTTP SSE 测试与增量构建
+
+两个 CI workflow 显式构建 `llm_tests`、`llm_streaming_tests`，与现有
+`http_client_tests`、`gateway_service_tests`、`config_tests` 一起由 `ctest -L ci` 执行。
+`llm_tests` 的 `ci;unit;llm` 标签包含新增 SSE decoder 测试；`llm_streaming_tests`
+的 `ci;llm;streaming;e2e` 标签包含真实 socket 的坏 chunk、断连、取消、心跳与背压边界。
+GoogleTest discovery 的 LABELS 分号需要转义，避免后续标签被解析为其他属性；
+service test helper 统一转义，保证 Gateway/Persona 的 `ci` 标签进入实际 CTest 清单。
+Python 流式压测解析器测试在安装 httpx/psutil 后单独执行，不依赖真实 Provider、Redis 或 GPU。
+
+PR、main/master push 和手动触发均运行上述检查，没有按变更路径跳过新增测试的规则。
+ccache/sccache 只复用编译结果，不缓存测试结果；CI 每次重建当前配置的测试目标并运行全部
+`ci` 标签用例，不会仅运行“本次新增”用例。新源码、编译参数与包含的头文件变更会影响编译缓存。
+真实 Provider smoke 与 CUDA 容量压测仍为手动验收，避免在普通 CI 消耗云配额或要求 GPU。
+
+`/bigobj` 仅在 `if(MSVC)` 内为相关目标私有启用，解决 PE/COFF 节数限制，不进入 GCC 编译命令。
+Linux GCC/Clang 使用 ELF，可表示扩展节数量，不需要对应的 bigobj 开关；C++20 已启用标准协程，
+Ubuntu 24.04 的 GCC 不需要额外添加 `-fcoroutines`。GCC 的模板编译仍可能消耗较多内存，
+CI 保持已有的两路编译并发，是否有实际资源瓶颈由 Linux CI 构建结果判定。
+
 ## 本地 Core/SDK 构建
 
 ### Windows

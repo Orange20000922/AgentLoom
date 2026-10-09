@@ -3,6 +3,8 @@
 
 #include <boost/asio.hpp>
 #include <atomic>
+#include <algorithm>
+#include <cctype>
 #include <exception>
 #include <thread>
 #include <unordered_map>
@@ -25,6 +27,7 @@ core::Result<net::HttpClientRequest> BuildHttpRequest(
     http_request.method = "POST";
     http_request.url = std::move(url);
     http_request.headers.push_back({"Content-Type", "application/json"});
+    if (request.stream) http_request.headers.push_back({"Accept", "text/event-stream"});
     if (!options.api_key.empty()) {
         http_request.headers.push_back({"Authorization", "Bearer " + options.api_key});
     }
@@ -99,6 +102,8 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::Complete(
             core::LoggerAdapter::ForModule("llm-client").warn("LLM request rejected: {}", status.message());
             return status;
         }
+        if (req.stream)
+            return core::Status::Error(core::ErrorCode::InvalidArgument, "synchronous Complete does not support streaming");
         return ExecuteWithRetry(req);
     } catch (const std::exception& e) {
         return core::Status(core::ErrorCode::InternalError,
@@ -222,12 +227,13 @@ public:
     AsyncOpenAiOperation(std::shared_ptr<OpenAiAsyncLlmClient::Impl> owner,
                          ChatCompletionRequest request,
                          net::HttpClientRequest http_request,
-                         IAsyncLlmClient::Callback callback)
+                         IAsyncLlmClient::Callback callback,
+                         std::unique_ptr<ILlmStreamDecoder> decoder = {})
         : owner_(std::move(owner)),
           request_(std::move(request)),
           http_request_(std::move(http_request)),
           retry_timer_(owner_->retry_context),
-          callback_(std::move(callback)) {}
+          callback_(std::move(callback)), decoder_(std::move(decoder)) {}
 
     void Start() noexcept {
         BeginAttempt();
@@ -260,6 +266,10 @@ private:
             return;
         }
         auto self = shared_from_this();
+        if (request_.stream) {
+            BeginStream(self);
+            return;
+        }
         auto submitted = owner_->http_client.ExecuteAsync(
             http_request_,
             [self](core::Result<net::HttpClientResponse> response) {
@@ -269,11 +279,76 @@ private:
             OnAttemptFailure(submitted.status());
             return;
         }
-        std::lock_guard lock(mutex_);
-        if (completed_.load(std::memory_order_acquire)) {
-            submitted.value()->Cancel();
-        } else {
-            http_operation_ = std::move(submitted).value();
+        bool cancel = false;
+        {
+            std::lock_guard lock(mutex_);
+            cancel = completed_.load(std::memory_order_acquire);
+            if (!cancel) http_operation_ = submitted.value();
+        }
+        if (cancel) submitted.value()->Cancel();
+    }
+
+    void BeginStream(const std::shared_ptr<AsyncOpenAiOperation>& self) noexcept {
+        auto* client = dynamic_cast<net::IAsyncStreamingHttpClient*>(&owner_->http_client);
+        if (!client) {
+            Finish(core::Status::Error(core::ErrorCode::Unimplemented, "HTTP client has no streaming capability"));
+            return;
+        }
+        try {
+            net::HttpStreamOptions stream_options;
+            stream_options.max_body_bytes = owner_->options.stream_limits.max_generation_bytes;
+            stream_options.read_buffer_bytes = std::min(stream_options.read_buffer_bytes, stream_options.max_body_bytes);
+            auto submitted = client->ExecuteStreamingAsync(http_request_, stream_options, {
+                .on_headers = [self](const net::HttpClientResponse& headers) {
+                    if (headers.status != 200)
+                        return DecodeHttpResponse(headers, self->request_, self->owner_->options,
+                                                  self->owner_->logger).status();
+                    for (const auto& header : headers.headers) {
+                        auto name = header.name;
+                        auto value = header.value;
+                        const auto lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+                        std::transform(name.begin(), name.end(), name.begin(), lower);
+                        std::transform(value.begin(), value.end(), value.begin(), lower);
+                        const auto semicolon = value.find(';');
+                        auto media = value.substr(0, semicolon);
+                        while (!media.empty() && media.back() == ' ') media.pop_back();
+                        const auto first = media.find_first_not_of(' ');
+                        if (name == "content-type" && first != std::string::npos &&
+                            media.substr(first) == "text/event-stream") return core::Status::Ok();
+                    }
+                    return core::Status::Error(core::ErrorCode::DataLoss, "LLM response is not text/event-stream");
+                },
+                .on_body = [self](std::string_view bytes) {
+                    std::lock_guard lock(self->stream_mutex_);
+                    if (self->completed_.load() || self->cancel_requested_.load())
+                        return core::Status::Error(core::ErrorCode::Cancelled, "LLM stream cancelled");
+                    return self->decoder_->Feed(bytes);
+                },
+                .on_complete = [self](core::Status status) {
+                    std::lock_guard lock(self->stream_mutex_);
+                    if (self->completed_.load()) return;
+                    try {
+                        self->Finish(status.ok() ? self->decoder_->Finish()
+                                                 : core::Result<ChatCompletionResponse>(status));
+                    } catch (...) {
+                        self->Finish(core::Status::Error(core::ErrorCode::InternalError,
+                                                        "LLM stream decoder finish failed"));
+                    }
+                },
+            });
+            if (!submitted.ok()) {
+                Finish(submitted.status());
+                return;
+            }
+            bool cancel = false;
+            {
+                std::lock_guard lock(mutex_);
+                cancel = completed_.load();
+                if (!cancel) http_operation_ = submitted.value();
+            }
+            if (cancel) submitted.value()->Cancel();
+        } catch (...) {
+            Finish(core::Status::Error(core::ErrorCode::InternalError, "LLM stream submission failed"));
         }
     }
 
@@ -337,6 +412,10 @@ private:
     }
 
     void Finish(core::Result<ChatCompletionResponse> result) noexcept {
+        // 取消可以来自任意业务线程；不能与增量 callback 并发访问 decoder/sink。
+        std::lock_guard stream_lock(stream_mutex_);
+        if (cancel_requested_.load(std::memory_order_acquire))
+            result = core::Status::Error(core::ErrorCode::Cancelled, "async LLM completion cancelled");
         if (completed_.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
@@ -345,6 +424,7 @@ private:
             self->retry_timer_.cancel(ignored);
         });
         owner_->Unregister(this);
+        if (!result.ok()) owner_->logger.warn("LLM operation failed code={}", static_cast<int>(result.status().code()));
         auto callback = std::move(callback_);
         try {
             callback(std::move(result));
@@ -360,6 +440,8 @@ private:
     net::HttpClientRequest http_request_;
     boost::asio::steady_timer retry_timer_;
     IAsyncLlmClient::Callback callback_;
+    std::unique_ptr<ILlmStreamDecoder> decoder_;
+    std::recursive_mutex stream_mutex_;
     std::mutex mutex_;
     std::shared_ptr<net::IAsyncHttpOperation> http_operation_;
     std::atomic<bool> cancel_requested_{false};
@@ -435,6 +517,22 @@ OpenAiAsyncLlmClient::~OpenAiAsyncLlmClient() {
 core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::CompleteAsync(
     ChatCompletionRequest request,
     Callback callback) {
+    if (request.stream) {
+        if (auto status = impl_->options.protocol->ValidateRequest(request); !status.ok()) return status;
+        return core::Status::Error(core::ErrorCode::InvalidArgument, "use CompleteStreamingAsync for streaming requests");
+    }
+    return SubmitCompletion(std::move(request), {}, std::move(callback));
+}
+
+core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::CompleteStreamingAsync(
+    ChatCompletionRequest request, LlmEventSink sink, Callback callback) {
+    if (!sink) return core::Status::Error(core::ErrorCode::InvalidArgument, "LLM stream sink is required");
+    request.stream = true;
+    return SubmitCompletion(std::move(request), std::move(sink), std::move(callback));
+}
+
+core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::SubmitCompletion(
+    ChatCompletionRequest request, LlmEventSink sink, Callback callback) {
     if (!callback) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "async LLM callback is required");
@@ -446,8 +544,18 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::Complete
         }
         auto built = BuildHttpRequest(impl_->options, request);
         if (!built.ok()) return built.status();
+        std::unique_ptr<ILlmStreamDecoder> decoder;
+        if (request.stream) {
+            if (!dynamic_cast<net::IAsyncStreamingHttpClient*>(&impl_->http_client))
+                return core::Status::Error(core::ErrorCode::Unimplemented, "HTTP client has no streaming capability");
+            LlmProtocolContext context{impl_->options.default_model, impl_->options.response_validation,
+                                       impl_->options.stream_limits, std::move(sink)};
+            auto created = impl_->options.protocol->CreateStreamDecoder(request, context);
+            if (!created.ok()) return created.status();
+            decoder = std::move(created).value();
+        }
         auto operation = std::make_shared<AsyncOpenAiOperation>(
-            impl_, std::move(request), std::move(built).value(), std::move(callback));
+            impl_, std::move(request), std::move(built).value(), std::move(callback), std::move(decoder));
         if (auto status = impl_->Register(operation); !status.ok()) {
             return status;
         }

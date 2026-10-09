@@ -105,6 +105,65 @@ async def get_json(client: httpx.AsyncClient, path: str, headers: dict[str, str]
     return response.json(), elapsed_ms
 
 
+async def post_stream(client: httpx.AsyncClient, payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], float, dict[str, float]]:
+    # 复用原 Gateway 负载入口；测量真实增量可见时间与提交终态，不把完整答案人为切片。
+    started = time.perf_counter()
+    metrics: dict[str, float] = {}
+    final: dict[str, Any] | None = None
+    text: list[str] = []
+    sequence = 0
+    event_name = ""
+    data_lines: list[str] = []
+    async with client.stream("POST", f"{client.base_url}/api/chat/message", json=payload, headers=headers) as response:
+        if response.status_code != 200:
+            raise RuntimeError(f"stream chat HTTP status {response.status_code}")
+        if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
+            raise RuntimeError("stream chat did not return text/event-stream")
+        async for line in response.aiter_lines():
+            if not line:
+                if data_lines:
+                    data = json.loads("\n".join(data_lines))
+                    elapsed = (time.perf_counter() - started) * 1000
+                    if event_name != "ping":
+                        next_sequence = data.get("sequence")
+                        if not isinstance(next_sequence, int) or next_sequence != sequence + 1:
+                            raise RuntimeError("stream sequence is missing, duplicated or out of order")
+                        sequence = next_sequence
+                        if final is not None:
+                            raise RuntimeError("business event arrived after turn terminal")
+                    if event_name == "TextDelta":
+                        metrics.setdefault("firstDeltaMs", elapsed)
+                        text.append(str(data["text"]))
+                    elif event_name == "GenerationCompleted":
+                        metrics["generationEndMs"] = elapsed
+                    elif event_name == "TurnFailed":
+                        code = data.get("error", {}).get("code", "UNKNOWN")
+                        raise RuntimeError(f"stream turn failed code={code}")
+                    elif event_name == "TurnCompleted":
+                        if not data.get("committed"):
+                            raise RuntimeError("stream success terminal did not confirm commit")
+                        metrics["turnCompleteMs"] = elapsed
+                        final = data
+                event_name, data_lines = "", []
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+    if final is None or "generationEndMs" not in metrics or "firstDeltaMs" not in metrics:
+        raise RuntimeError("stream ended without text, generation end or turn terminal")
+    final.setdefault("data", {}).setdefault("reply", {})["content"] = "".join(text)
+    metrics["generationEndToCommitMs"] = metrics["turnCompleteMs"] - metrics["generationEndMs"]
+    metrics["streamQueuePeakBytes"] = float(final.get("streamQueue", {}).get("peakBytes", 0))
+    metrics["streamQueuePeakItems"] = float(final.get("streamQueue", {}).get("peakItems", 0))
+    return final, (time.perf_counter() - started) * 1000, metrics
+
+
 async def run_virtual_user(
     client: httpx.AsyncClient,
     user_index: int,
@@ -120,6 +179,7 @@ async def run_virtual_user(
     tenant_count: int = 1,
     shared_user_across_tenants: bool = False,
     isolation_probe: bool = False,
+    stream: bool = False,
 ) -> list[dict[str, Any]]:
     if start_delay_s > 0:
         await asyncio.sleep(start_delay_s)
@@ -231,19 +291,19 @@ async def run_virtual_user(
         if chat_window:
             await chat_window.request_started(turn)
         try:
-            body, chat_ms = await post_json(
-                client,
-                "/api/chat/message",
-                {
-                    "traceId": f"bench-chat-{user_index}-{turn}",
+            payload = {
+                    "traceId": f"bench-chat-{now}-{user_index}-{turn}",
                     "sessionId": session_id,
                     "personaId": persona["personaId"],
                     "mode": "chat",
                     "message": message,
-                    "stream": False,
-                },
-                headers=headers,
-            )
+                    "stream": stream,
+                }
+            stream_metrics: dict[str, float] = {}
+            if stream:
+                body, chat_ms, stream_metrics = await post_stream(client, payload, headers)
+            else:
+                body, chat_ms = await post_json(client, "/api/chat/message", payload, headers=headers)
         except Exception as error:
             records.append(error_record("chat", error, turn))
             if chat_window:
@@ -270,6 +330,7 @@ async def run_virtual_user(
                 "ok": True,
                 "turn": turn,
                 "latencyMs": chat_ms,
+                **stream_metrics,
                 "backendTotalMs": pipeline.get("totalMs", body.get("latencyMs", 0)),
                 "computeQueueWaitMs": pipeline.get("computeQueueWaitMs", 0),
                 "computeStageMs": pipeline.get("computeStageMs", 0),
@@ -444,6 +505,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 args.tenant_count,
                 args.shared_user_across_tenants,
                 args.isolation_probe,
+                args.stream,
             ))
         nested = await asyncio.gather(*tasks)
 
@@ -483,6 +545,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     report = {
         "ok": not error_records and not isolation_failures,
         "scenario": args.scenario,
+        "stream": args.stream,
+        "streamQueuePeakBytes": max((record.get("streamQueuePeakBytes", 0) for record in chat_records), default=0),
+        "streamQueuePeakItems": max((record.get("streamQueuePeakItems", 0) for record in chat_records), default=0),
         "baseUrl": base_url,
         "personaId": args.persona,
         "concurrency": args.concurrency,
@@ -517,6 +582,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "memoryContext": summarize(memory_latency),
             "llmTotal": summarize(llm_latency),
             "callbackToResponse": summarize(callback_latency),
+            **{name: summarize([float(record[name]) for record in chat_records if name in record])
+               for name in ("firstDeltaMs", "generationEndMs", "turnCompleteMs", "generationEndToCommitMs") if args.stream},
         },
         "latencyMsByTurn": per_turn_latency,
         "memory": {
@@ -526,6 +593,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "vmsMb": summarize([sample["vmsMb"] for sample in memory_samples]),
             "peakRssMb": max((sample["rssMb"] for sample in memory_samples), default=0),
             "peakPrivateMb": max((sample["privateMb"] for sample in memory_samples), default=0),
+            "peakThreads": max((sample["numThreads"] for sample in memory_samples), default=0),
         },
         "l0": {
             "hits": sum(1 for record in chat_records if record.get("l0Hit")),
@@ -551,6 +619,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--turns", type=int, default=2)
+    parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--persona", default="lidazhi")
     parser.add_argument("--think-ms", type=int, default=0)
     parser.add_argument("--ramp-up-seconds", type=float, default=0.0)

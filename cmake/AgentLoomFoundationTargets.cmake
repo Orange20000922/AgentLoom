@@ -37,6 +37,8 @@ add_library(agent_net STATIC
     src/net/http_request_filter.cpp
     src/net/http_request_filter.h
     src/net/http_server.cpp
+    src/net/http_sse_session.cpp
+    src/net/sse_stream.h
     src/net/http_server.h
     src/net/http_types.h
     src/net/protocol_types.h
@@ -96,6 +98,8 @@ endif()
 
 # ──────────── Outbound HTTP/HTTPS client (reusable for LLM, RAG, webhooks) ────────────
 add_library(agent_http_client STATIC
+    src/net/sse.h
+    src/net/sse.cpp
     src/net/http_client/http_client.h
     src/net/http_client/url_parser.h
     src/net/http_client/url_parser.cpp
@@ -122,6 +126,12 @@ target_link_libraries(agent_http_client PUBLIC
     OpenSSL::Crypto
 )
 
+if(MSVC)
+    # Beast 的 HTTP/TLS 协程模板会生成大量 COMDAT 节，使用扩展 COFF 格式避免 C1128。
+    # 只影响本库的对象文件格式，不传播给 SDK 消费者；其他编译器沿用原有选项。
+    target_compile_options(agent_http_client PRIVATE /bigobj)
+endif()
+
 if(BERT_BUILD_TESTS)
     add_executable(http_client_tests
         tests/net/http_client/url_parser_test.cpp
@@ -144,6 +154,7 @@ add_library(agent_llm STATIC
     src/llm/llm_client.cpp
     src/llm/llm_protocol.h
     src/llm/llm_protocol.cpp
+    src/llm/chat_completions_stream_decoder.cpp
     src/llm/openai_llm_client.h
     src/llm/openai_llm_client.cpp
     src/llm/cloud_task_coordinator.h
@@ -171,6 +182,7 @@ endif()
 
 if(BERT_BUILD_TESTS)
     add_executable(llm_tests
+        tests/llm/llm_stream_decoder_test.cpp
         tests/llm/llm_protocol_test.cpp
         tests/llm/openai_llm_client_test.cpp
         tests/llm/cloud_task_coordinator_test.cpp
@@ -182,7 +194,16 @@ if(BERT_BUILD_TESTS)
     if(AGENTLOOM_BUILD_LOCAL_LLM)
         target_compile_definitions(llm_tests PRIVATE AGENTLOOM_TEST_LOCAL_LLM=1)
     endif()
-    gtest_discover_tests(llm_tests DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(llm_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci\;unit\;llm")
+
+    add_executable(llm_streaming_tests tests/llm/llm_stream_transport_test.cpp)
+    target_link_libraries(llm_streaming_tests PRIVATE agent_llm agent_net GTest::gtest_main)
+    if(MSVC)
+        target_compile_options(llm_streaming_tests PRIVATE /bigobj)
+    endif()
+    gtest_discover_tests(llm_streaming_tests DISCOVERY_MODE PRE_TEST PROPERTIES LABELS "ci\;llm\;streaming\;e2e")
 
     add_executable(llm_integration_tests
         tests/llm/llm_integration_e2e_test.cpp

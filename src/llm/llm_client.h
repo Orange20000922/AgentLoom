@@ -3,6 +3,7 @@
 #include "../core/result.h"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -174,6 +175,44 @@ private:
     mutable std::mutex mutex_;
     int consecutive_failures_ = 0;
     std::chrono::steady_clock::time_point next_primary_probe_{};
+};
+
+enum class LlmStreamEventKind {
+    TextDelta, ToolCallProgress, ToolExecutionState, UsageUpdated,
+    OutputItemCompleted, GenerationCompleted,
+};
+
+struct LlmStreamEvent {
+    LlmStreamEventKind kind = LlmStreamEventKind::TextDelta;
+    std::string request_id;
+    std::string turn_id;
+    std::string generation_id;
+    std::string item_id = "0";
+    std::uint64_t sequence = 0;
+    std::string text;
+    ChatToolCall tool_call;
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+    int total_tokens = 0;
+};
+
+// Publish 必须快速返回；失败（含背压）会终止生成，不允许丢弃文本 delta。
+using LlmEventSink = std::function<core::Status(const LlmStreamEvent&)>;
+
+struct LlmStreamLimits {
+    std::size_t max_event_bytes = 256 * 1024;
+    std::size_t max_generation_bytes = 16 * 1024 * 1024;
+    std::size_t max_tool_arguments_bytes = 1024 * 1024;
+    std::size_t max_tool_calls = 64;
+};
+
+// 独立能力接口保持原 CompleteAsync 消费者兼容；不能将完整答案切片伪装成 streaming。
+class IAsyncStreamingLlmClient {
+public:
+    virtual ~IAsyncStreamingLlmClient() = default;
+    virtual core::Result<std::shared_ptr<IAsyncLlmOperation>> CompleteStreamingAsync(
+        ChatCompletionRequest request, LlmEventSink sink,
+        IAsyncLlmClient::Callback callback) = 0;
 };
 
 class LlmPromptStore {

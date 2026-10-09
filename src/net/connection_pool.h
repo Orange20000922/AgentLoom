@@ -24,6 +24,7 @@ struct ConnectionPoolOptions {
     std::size_t max_websocket_connections = 0;
     std::size_t memory_reserve_bytes = 0;
     std::size_t memory_blocks_per_slab = 64;
+    // 可空、非拥有的外部线程池；使用指针以兼容既有 API，须活到所有连接任务收口。
     core::ThreadPool* task_pool = nullptr;
 };
 

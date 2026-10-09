@@ -361,6 +361,14 @@ struct GatewayPersonaConfigOptions {
     GatewayEmotionStateConfigOptions emotion_state;
 };
 
+struct GatewayStreamingConfigOptions {
+    net::SseStreamOptions transport;
+    std::size_t max_replay_turns = 64;
+    std::size_t max_replay_events = 128;
+    std::size_t max_replay_bytes = 512 * 1024;
+    int replay_retention_ms = 30000;
+};
+
 struct PersonaGatewayConfigOptions {
     std::string websocket_path = "/ws/session";
     GatewayStaticFilesConfigOptions static_files;
@@ -374,6 +382,7 @@ struct PersonaGatewayConfigOptions {
     std::size_t session_max_active_sessions = 1024;
     std::size_t runtime_recent_raw_turns = 10;
     std::string runtime_default_model;
+    GatewayStreamingConfigOptions streaming;
     bool request_filter_enabled = true;
     bool reject_control_chars = true;
     bool reject_suspicious_patterns = true;
@@ -519,6 +528,11 @@ PersonaGatewayServerOptionsT ToPersonaGatewayServerOptions(const MultimodalServe
     options.session.max_recent_turns = config.persona_gateway.session_max_recent_turns;
     options.session.max_active_sessions = config.persona_gateway.session_max_active_sessions;
     options.runtime.recent_raw_turns = config.persona_gateway.runtime_recent_raw_turns;
+    options.streaming.transport = config.persona_gateway.streaming.transport;
+    options.streaming.replay.max_turns = config.persona_gateway.streaming.max_replay_turns;
+    options.streaming.replay.max_events_per_turn = config.persona_gateway.streaming.max_replay_events;
+    options.streaming.replay.max_bytes_per_turn = config.persona_gateway.streaming.max_replay_bytes;
+    options.streaming.replay.terminal_retention = std::chrono::milliseconds(config.persona_gateway.streaming.replay_retention_ms);
     options.runtime.default_model = config.persona_gateway.runtime_default_model.empty()
         ? config.llm.model
         : config.persona_gateway.runtime_default_model;

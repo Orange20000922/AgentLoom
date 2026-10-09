@@ -1118,6 +1118,57 @@ TEST(ConfigPersonaGatewaySectionTest, RejectsInvalidWebSocketPath) {
         std::runtime_error);
 }
 
+TEST(ConfigPersonaGatewaySectionTest, LoadsStreamingLimitsAndHeartbeatPolicy) {
+    ScopedTempDirectory tmp("persona_gateway_stream");
+    const auto config = WriteFile(tmp.path() / "config.json", R"({
+        "llm":{"enabled":false},
+        "persona_gateway":{"streaming":{
+            "max_pending_events":32,"max_pending_bytes":8192,"max_event_bytes":2048,
+            "max_replay_turns":16,"max_replay_events":64,"max_replay_bytes":4096,
+            "heartbeat_interval_ms":50,"idle_timeout_ms":250,"max_duration_ms":2000,
+            "write_timeout_ms":500,"reconnect_delay_ms":25,"replay_retention_ms":1000,"require_pong":true
+        }}
+    })");
+    auto opts = Parse({"test", "--llm", "llm.gguf", "--config", config.string()});
+    const auto& value = opts.persona_gateway.streaming;
+    EXPECT_EQ(value.transport.outbound.max_items, 32);
+    EXPECT_EQ(value.transport.outbound.max_bytes, 8192);
+    EXPECT_EQ(value.transport.max_event_bytes, 2048);
+    EXPECT_EQ(value.transport.heartbeat_interval.count(), 50);
+    EXPECT_EQ(value.transport.idle_timeout.count(), 250);
+    EXPECT_EQ(value.transport.max_duration.count(), 2000);
+    EXPECT_EQ(value.transport.write_timeout.count(), 500);
+    EXPECT_EQ(value.transport.reconnect_delay_ms, 25);
+    EXPECT_TRUE(value.transport.require_pong);
+    EXPECT_EQ(value.max_replay_turns, 16);
+    EXPECT_EQ(value.max_replay_events, 64);
+    EXPECT_EQ(value.max_replay_bytes, 4096);
+    EXPECT_EQ(value.replay_retention_ms, 1000);
+}
+
+TEST(ConfigPersonaGatewaySectionTest, RejectsUnboundedStreamingAndInvalidIdlePolicy) {
+    ScopedTempDirectory tmp("persona_gateway_bad_stream");
+    for (const auto* field : {"max_pending_events", "max_pending_bytes", "max_event_bytes", "max_replay_turns",
+                             "max_replay_events", "max_replay_bytes", "replay_retention_ms"}) {
+        const auto config = WriteFile(tmp.path() / "config.json", std::string("{\"llm\":{\"enabled\":false},") +
+            "\"persona_gateway\":{\"streaming\":{\"" + field + "\":0}}}");
+        try {
+            Parse({"test", "--llm", "llm.gguf", "--config", config.string()});
+            FAIL() << "zero streaming limit was accepted: " << field;
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find(field), std::string::npos);
+        }
+    }
+    const auto config = WriteFile(tmp.path() / "config.json", R"({"llm":{"enabled":false},
+        "persona_gateway":{"streaming":{"heartbeat_interval_ms":100,"idle_timeout_ms":50}}})");
+    try {
+        Parse({"test", "--llm", "llm.gguf", "--config", config.string()});
+        FAIL() << "invalid streaming idle policy was accepted";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("idle_timeout_ms"), std::string::npos);
+    }
+}
+
 TEST(ConfigPersonaGatewaySectionTest, RejectsUnknownThreadPoolScheduler) {
     ScopedTempDirectory tmp("persona_gateway_bad_scheduler");
     auto config_file = tmp.path() / "config.json";

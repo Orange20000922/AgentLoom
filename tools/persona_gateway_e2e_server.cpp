@@ -371,13 +371,28 @@ ToolConfig LoadConfig(const fs::path& config_path) {
     config.logging.use_daily_rotation = GetBool(logging, "use_daily_rotation", false);
     config.logging.max_file_size_bytes = static_cast<std::size_t>(GetInt(logging, "max_file_size_bytes", 10 * 1024 * 1024));
     config.logging.max_files = static_cast<std::size_t>(GetInt(logging, "max_files", 5));
-    config.logging.module_names = {"gateway", "service", "classroom", "gateway-auth"};
+    config.logging.module_names = {"gateway", "service", "classroom", "gateway-auth", "net", "gateway-sse",
+                                    "async-http-client", "async-llm-client", "llm-stream"};
 
     const auto gateway = config.root.value("persona_gateway", Json::object());
     config.gateway.http.address = GetString(gateway, "address", "127.0.0.1");
     config.gateway.http.port = static_cast<std::uint16_t>(GetInt(gateway, "port", 18080));
     config.gateway.http.io_threads = GetInt(gateway, "http_io_threads", 1);
     config.gateway.websocket_path = GetString(gateway, "websocket_path", "/ws/session");
+    const auto streaming = gateway.value("streaming", Json::object());
+    auto& transport = config.gateway.streaming.transport;
+    auto& replay = config.gateway.streaming.replay;
+    transport.outbound.max_items = GetSize(streaming, "max_pending_events", transport.outbound.max_items);
+    transport.outbound.max_bytes = GetSize(streaming, "max_pending_bytes", transport.outbound.max_bytes);
+    transport.max_event_bytes = GetSize(streaming, "max_event_bytes", transport.max_event_bytes);
+    transport.heartbeat_interval = std::chrono::milliseconds(GetInt(streaming, "heartbeat_interval_ms", 15000));
+    transport.idle_timeout = std::chrono::milliseconds(GetInt(streaming, "idle_timeout_ms", 60000));
+    transport.max_duration = std::chrono::milliseconds(GetInt(streaming, "max_duration_ms", 300000));
+    transport.require_pong = GetBool(streaming, "require_pong", false);
+    replay.max_turns = GetSize(streaming, "max_replay_turns", replay.max_turns);
+    replay.max_events_per_turn = GetSize(streaming, "max_replay_events", replay.max_events_per_turn);
+    replay.max_bytes_per_turn = GetSize(streaming, "max_replay_bytes", replay.max_bytes_per_turn);
+    replay.terminal_retention = std::chrono::milliseconds(GetInt(streaming, "replay_retention_ms", 30000));
 
     const auto compute_pool = gateway.value("compute_pool", Json::object());
     config.gateway.compute_pool.worker_count = GetSize(compute_pool, "worker_count", 2);
@@ -745,7 +760,8 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config) {
         if (!async_cloud.ok()) {
             return async_cloud.status();
         }
-        struct AsyncClientWithTransport final : public agent::llm::IAsyncLlmClient {
+        struct AsyncClientWithTransport final : public agent::llm::IAsyncLlmClient,
+                                                public agent::llm::IAsyncStreamingLlmClient {
             std::shared_ptr<agent::net::IAsyncHttpClient> transport;
             std::unique_ptr<agent::llm::OpenAiAsyncLlmClient> client;
 
@@ -753,6 +769,10 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config) {
                 agent::llm::ChatCompletionRequest request,
                 Callback callback) override {
                 return client->CompleteAsync(std::move(request), std::move(callback));
+            }
+            core::Result<std::shared_ptr<agent::llm::IAsyncLlmOperation>> CompleteStreamingAsync(
+                agent::llm::ChatCompletionRequest request, agent::llm::LlmEventSink sink, Callback callback) override {
+                return client->CompleteStreamingAsync(std::move(request), std::move(sink), std::move(callback));
             }
         };
         auto async_holder = std::make_shared<AsyncClientWithTransport>();

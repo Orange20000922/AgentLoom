@@ -22,11 +22,13 @@
 #include "server_options.h"
 #include "openai_llm_client.h"
 #include "beast_http_client.h"
+#include "async_beast_http_client.h"
 #include "tls_context.h"
 
 #include <chrono>
 #include <exception>
 #include <iostream>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -41,12 +43,13 @@ int Fail(const std::string& msg) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <config.json> [user_prompt] [max_tokens]\n";
+        std::cerr << "Usage: " << argv[0] << " <config.json> [user_prompt] [max_tokens] [--stream]\n";
         std::cerr << "       (reads llm.* from config.json, sends one chat completion)\n";
         return 2;
     }
 
     const std::string config_path = argv[1];
+    const bool streaming = argc >= 5 && std::string_view(argv[4]) == "--stream";
     const std::string user_prompt = (argc >= 3) ? argv[2]
                                                 : "你好，用一句话介绍你自己。";
     int max_tokens = 0;
@@ -113,6 +116,7 @@ int main(int argc, char** argv) {
     }
     agent::net::BeastHttpClientOptions http_opts;
     http_opts.tls_context = std::move(tls_r).value();
+    auto streaming_tls = http_opts.tls_context;
     auto http_r = agent::net::BeastHttpClient::Create(std::move(http_opts));
     if (!http_r) {
         return Fail("HTTP client: " + http_r.status().message());
@@ -140,12 +144,58 @@ int main(int argc, char** argv) {
     auto client = std::move(client_r).value();
 
     agent::llm::ChatCompletionRequest req;
-    if (prompt_store.Has("smoke")) {
+    if (!streaming && prompt_store.Has("smoke")) {
         req.messages.push_back({agent::llm::ChatRole::System,
                                  prompt_store.Get("smoke").value()});
     }
     req.messages.push_back({agent::llm::ChatRole::User, user_prompt});
     req.max_tokens = max_tokens;
+
+    if (streaming) {
+        // 复用现有密钥/CA 配置，真实 SSE 兼容验收只输出时间、计数及用量，不输出正文。
+        agent::net::AsyncBeastHttpClientOptions async_options;
+        async_options.tls_context = std::move(streaming_tls);
+        async_options.io_thread_count = 2;
+        auto transport = agent::net::AsyncBeastHttpClient::Create(async_options);
+        if (!transport.ok()) return Fail("async HTTP create failed");
+        agent::llm::OpenAiLlmClientOptions stream_options;
+        stream_options.base_url = options.llm.base_url;
+        stream_options.api_key = options.llm.api_key;
+        stream_options.default_model = options.llm.model;
+        stream_options.timeout_ms = options.llm.timeout_ms;
+        auto stream_client = agent::llm::OpenAiAsyncLlmClient::Create(stream_options, *transport.value());
+        if (!stream_client.ok()) return Fail("async LLM create failed");
+        std::promise<core::Result<agent::llm::ChatCompletionResponse>> completion;
+        auto future = completion.get_future();
+        const auto began = std::chrono::steady_clock::now();
+        std::optional<std::chrono::steady_clock::time_point> first;
+        std::size_t deltas = 0;
+        auto submitted = stream_client.value()->CompleteStreamingAsync(std::move(req), [&](const auto& event) {
+            if (event.kind == agent::llm::LlmStreamEventKind::TextDelta) {
+                if (!first) first = std::chrono::steady_clock::now();
+                ++deltas;
+            }
+            return core::Status::Ok();
+        }, [&](auto result) { completion.set_value(std::move(result)); });
+        if (!submitted.ok()) return Fail("stream submission failed");
+        if (future.wait_for(std::chrono::milliseconds(options.llm.timeout_ms + 1000)) != std::future_status::ready) {
+            stream_client.value()->Shutdown();
+            transport.value()->Shutdown();
+            return Fail("stream callback deadline exceeded");
+        }
+        auto result = future.get();
+        stream_client.value()->Shutdown();
+        transport.value()->Shutdown();
+        if (!result.ok()) return Fail("stream failed code=" + std::to_string(static_cast<int>(result.status().code())));
+        const auto& response = result.value();
+        std::cout << "[smoke] streaming OK ttft_ms="
+                  << (first ? std::chrono::duration_cast<std::chrono::milliseconds>(*first - began).count() : -1)
+                  << " total_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count()
+                  << " text_deltas=" << deltas << " reply_bytes=" << response.content.size()
+                  << " prompt_tokens=" << response.prompt_tokens << " completion_tokens=" << response.completion_tokens
+                  << " total_tokens=" << response.total_tokens << " finish_reason=" << response.finish_reason << '\n';
+        return 0;
+    }
 
     std::cout << "[smoke] sending request..." << std::endl;
     auto start = std::chrono::steady_clock::now();

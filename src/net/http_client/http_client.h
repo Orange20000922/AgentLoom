@@ -3,9 +3,11 @@
 #include "result.h"
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace agent::net {
@@ -61,6 +63,26 @@ public:
     virtual core::Result<std::shared_ptr<IAsyncHttpOperation>> ExecuteAsync(
         HttpClientRequest request,
         Callback callback) = 0;
+};
+
+struct HttpStreamOptions {
+    std::size_t max_body_bytes = 16 * 1024 * 1024;
+    std::size_t read_buffer_bytes = 16 * 1024;
+    std::chrono::milliseconds idle_timeout{30000};
+};
+
+struct HttpStreamCallbacks {
+    // 响应头先于任何 body；失败即关闭传输。视图只在 callback 期间有效。
+    std::function<core::Status(const HttpClientResponse&)> on_headers;
+    std::function<core::Status(std::string_view)> on_body;
+    std::function<void(core::Status)> on_complete;
+};
+
+class IAsyncStreamingHttpClient {
+public:
+    virtual ~IAsyncStreamingHttpClient() = default;
+    virtual core::Result<std::shared_ptr<IAsyncHttpOperation>> ExecuteStreamingAsync(
+        HttpClientRequest request, HttpStreamOptions options, HttpStreamCallbacks callbacks) = 0;
 };
 
 }

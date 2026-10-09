@@ -1,0 +1,94 @@
+{
+  "_README": [
+    "Fake SSE Gateway benchmark; CUDA MiniLM L0 enabled and Emotion disabled.",
+    "Start openai_compatible_quota_mock_server on 18181, then persona_gateway_e2e_server with this config.",
+    "Run gateway_concurrency_benchmark.py --stream --base-url http://127.0.0.1:18180.",
+    "All model/database paths are relative to this example; local dependency settings belong in ignored copies."
+  ],
+  "logging": {
+    "log_dir": "../build/reports/sse_20261009/logs",
+    "logger_name": "sse_benchmark",
+    "file_name": "gateway.log",
+    "enable_console": false,
+    "use_daily_rotation": false,
+    "max_file_size_bytes": 10485760,
+    "max_files": 2
+  },
+  "persona_gateway": {
+    "address": "127.0.0.1",
+    "port": 18180,
+    "http_io_threads": 8,
+    "static_files": {"enabled": false},
+    "compute_pool": {"worker_count": 2, "queue_capacity": 1024},
+    "io_pool": {"worker_count": 4, "queue_capacity": 2048, "scheduler": "session_affinity"},
+    "llm_pool": {
+      "worker_count": 8,
+      "queue_capacity": 2048,
+      "scheduler": "session_affinity",
+      "max_active_keys": 1024,
+      "max_outstanding_per_key": 8,
+      "max_outstanding_per_fairness_key": 1024,
+      "max_outstanding_per_tenant": 1024
+    },
+    "session_idle_timeout_minutes": 15,
+    "session_max_recent_turns": 8,
+    "runtime_recent_raw_turns": 4,
+    "runtime_default_model": "mock-chat",
+    "streaming": {
+      "max_replay_turns": 256,
+      "max_pending_events": 256,
+      "max_pending_bytes": 1048576,
+      "max_replay_events": 128,
+      "max_replay_bytes": 524288,
+      "replay_retention_ms": 30000
+    },
+    "personas": [{"personaId": "lidazhi", "personality": {"name": "李大志", "description": "回答简洁、自然。"}}],
+    "request_filter": {"enabled": true}
+  },
+  "gateway_auth": {
+    "enabled": true,
+    "require_auth_for_api": true,
+    "allow_dev_identity": false,
+    "enable_dev_registration": true,
+    "generate_dev_keys": true,
+    "issuer": "agent-sse-benchmark",
+    "audience": "agent-gateway",
+    "require_session_record": true,
+    "auto_provision_session": true,
+    "session_store_backend": "sqlite",
+    "session_database_path": "../build/reports/sse_20261009/auth.sqlite"
+  },
+  "llm": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:18181/v1",
+    "async_http_io_threads": 4,
+    "http_keep_alive": true,
+    "http_max_idle_connections": 512,
+    "http_max_idle_connections_per_origin": 512,
+    "http_idle_timeout_ms": 30000,
+    "model": "mock-chat",
+    "timeout_ms": 30000,
+    "max_retries": 0,
+    "require_api_key": false,
+    "allow_placeholder": false
+  },
+  "embedding": {
+    "tokenizer_path": "../onnx_models/minilm/tokenizer.json",
+    "model_path": "../onnx_models/minilm/model.onnx",
+    "execution_provider": "cuda",
+    "dimension": 384
+  },
+  "l0_memory": {
+    "enabled": true,
+    "redis_host": "127.0.0.1",
+    "redis_port": 5000,
+    "sqlite_path": "../build/reports/sse_20261009/l0.sqlite",
+    "max_cached_records": 1000,
+    "top_k": 5,
+    "neighbors_per_hit": 1
+  },
+  "emotion_analyzer": {"enabled": false},
+  "emotion_fusion": {"enabled": false, "vector_enabled": false},
+  "skill_session": {"enabled": false},
+  "local_llm": {"enabled": false}
+}

@@ -1,5 +1,6 @@
 #include "persona_gateway_server.h"
 #include "beast_http_client.h"
+#include "llm_protocol.h"
 #include "../../src/skill/skill_executor.h"
 
 #include <gtest/gtest.h>
@@ -9,6 +10,8 @@
 #include <chrono>
 #include <filesystem>
 #include <mutex>
+#include <future>
+#include <set>
 
 namespace {
 
@@ -74,7 +77,8 @@ public:
     void Cancel() noexcept override {}
 };
 
-class ToolCallingLlm final : public llm::ILlmClient, public llm::IAsyncLlmClient {
+class ToolCallingLlm final : public llm::ILlmClient, public llm::IAsyncLlmClient,
+                             public llm::IAsyncStreamingLlmClient {
 public:
     core::Result<llm::ChatCompletionResponse> Complete(
         const llm::ChatCompletionRequest& request) override {
@@ -102,6 +106,30 @@ public:
     std::vector<llm::ChatCompletionRequest> Requests() const {
         std::lock_guard lock(mutex_);
         return requests_;
+    }
+    core::Result<std::shared_ptr<llm::IAsyncLlmOperation>> CompleteStreamingAsync(
+        llm::ChatCompletionRequest request, llm::LlmEventSink sink, Callback callback) override {
+        ++async_calls;
+        auto response = Complete(request);
+        if (!response.ok()) return response.status();
+        llm::LlmProtocolContext context;
+        context.event_sink = std::move(sink);
+        auto created = llm::ChatCompletionsProtocol{}.CreateStreamDecoder(request, context);
+        if (!created.ok()) return created.status();
+        auto decoder = std::move(created).value();
+        auto feed = [&](Json delta, Json finish = nullptr) {
+            return decoder->Feed("data: " + Json{{"id", "tool-generation"}, {"model", "gateway-tool-test"},
+                {"choices", Json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish}}})}}.dump() + "\n\n");
+        };
+        auto status = feed({{"content", response.value().tool_calls.empty() ? response.value().content : "planning should be hidden"}});
+        if (status.ok() && !response.value().tool_calls.empty()) {
+            const auto& call = response.value().tool_calls.front();
+            status = feed({{"tool_calls", Json::array({{{"index", 0}, {"id", call.id}, {"type", "function"},
+                {"function", {{"name", call.name}, {"arguments", call.arguments_json}}}}})}}, "tool_calls");
+        } else if (status.ok()) status = feed(Json::object(), "stop");
+        if (status.ok()) status = decoder->Feed("data: [DONE]\n\n");
+        callback(status.ok() ? decoder->Finish() : core::Result<llm::ChatCompletionResponse>(status));
+        return std::shared_ptr<llm::IAsyncLlmOperation>(std::make_shared<CompletedLlmOperation>());
     }
     std::atomic<int> async_calls{0};
 private:
@@ -323,6 +351,42 @@ TEST(GatewayToolCallingConfigurationTest, RejectsExecutorFactoryWithoutSkillDepe
     gateway::PersonaGatewayServer server(harness.Options(), std::move(dependencies));
     auto started = server.Start();
     EXPECT_EQ(started.code(), core::ErrorCode::FailedPrecondition);
+}
+
+TEST(GatewayToolCallingStreamingTest, HidesFirstRoundTextDistinguishesGenerationsAndCommitsOnce) {
+    Harness harness;
+    gateway::PersonaGatewayServer server(harness.Options(), harness.Dependencies(true));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.trace_id = "stream-tool-turn";
+    request.message = "retrieve the fact";
+    request.stream = true;
+    std::vector<llm::LlmStreamEvent> events;
+    request.event_sink = [&](const auto& event) { events.push_back(event); return core::Status::Ok(); };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> completion;
+    auto future = completion.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { completion.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_EQ(result.value().content, "grounded final reply");
+    std::string text;
+    std::set<std::string> generations;
+    int tool_states = 0;
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        EXPECT_EQ(events[i].sequence, i + 1);
+        EXPECT_EQ(events[i].request_id, "stream-tool-turn");
+        generations.insert(events[i].generation_id);
+        if (events[i].kind == llm::LlmStreamEventKind::TextDelta) text += events[i].text;
+        if (events[i].kind == llm::LlmStreamEventKind::ToolExecutionState) ++tool_states;
+    }
+    EXPECT_EQ(text, "grounded final reply");
+    EXPECT_EQ(generations.size(), 2);
+    EXPECT_EQ(tool_states, 2);
+    harness.CheckFollowUp(true);
 }
 
 }

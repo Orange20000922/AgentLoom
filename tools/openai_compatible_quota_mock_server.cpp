@@ -5,6 +5,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/beast/http.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -134,6 +135,7 @@ private:
 
         asio::steady_timer timer;
         std::shared_ptr<::net::IHttpRequest> request;
+        std::shared_ptr<::net::IServerEventStream> stream;
     };
 
     void StartReady() {
@@ -147,12 +149,60 @@ private:
             peak_inflight_.store(
                 std::max(peak_inflight_.load(std::memory_order_relaxed), inflight),
                 std::memory_order_relaxed);
+            const auto body = nlohmann::json::parse(operation->request->message().body(), nullptr, false);
+            if (body.is_object() && body.contains("stream") && body["stream"] == true) {
+                // 新增 Mock 流式路径也使用协程；延迟总量与完整响应基线相同。
+                asio::co_spawn(io_context_, Stream(operation),
+                    [weak = weak_from_this(), operation](std::exception_ptr error, bool success) {
+                        if (auto self = weak.lock()) {
+                            if (error && operation->stream)
+                                operation->stream->AbortEvents(core::Status::Error(core::ErrorCode::InternalError,
+                                                                                  "mock stream coroutine failed"));
+                            if (self->inflight_.load() > 0) self->inflight_.fetch_sub(1);
+                            if (success && !error) self->completed_.fetch_add(1);
+                            self->StartReady();
+                        }
+                    });
+                continue;
+            }
             operation->timer.expires_after(delay_);
             operation->timer.async_wait(
                 [self = shared_from_this(), operation](const boost::system::error_code& error) {
                     self->Complete(operation, error);
                 });
         }
+    }
+
+    asio::awaitable<bool> Stream(std::shared_ptr<PendingOperation> operation) {
+        std::weak_ptr<PendingOperation> weak_operation = operation;
+        auto opened = operation->request->BeginEventStream({},
+            [weak = weak_from_this(), weak_operation](core::Status status) {
+                if (!status.ok()) if (auto self = weak.lock()) asio::post(self->io_context_, [weak_operation] {
+                    if (auto pending = weak_operation.lock()) pending->timer.cancel();
+                });
+            });
+        if (!opened.ok()) { RespondUnavailable(operation->request); co_return false; }
+        operation->stream = opened.value();
+        const auto content = ExtractMemoryMarkers(operation->request->message().body());
+        const auto split = content.size() / 2;
+        boost::system::error_code error;
+        auto send = [&](std::string text, nlohmann::json finish = nullptr) {
+            using Json = nlohmann::json;
+            Json chunk{{"id", "cpp-quota-mock"}, {"model", "mock-enterprise-chat"},
+                {"choices", Json::array({{{"index", 0}, {"delta", {{"content", text}}}, {"finish_reason", finish}}})}};
+            return operation->stream->SendEvent({{}, chunk.dump(), {}});
+        };
+        operation->timer.expires_after(delay_ / 4);
+        co_await operation->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        if (error || !send(content.substr(0, split)).ok()) co_return false;
+        operation->timer.expires_after(delay_ - delay_ / 4);
+        co_await operation->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        if (error || !send(content.substr(split), "stop").ok()) co_return false;
+        if (!operation->stream->SendEvent({{}, R"({"choices":[],"usage":{"prompt_tokens":16,"completion_tokens":8,"total_tokens":24}})", {}}).ok())
+            co_return false;
+        if (!operation->stream->SendEvent({{}, "[DONE]", {}}).ok()) co_return false;
+        operation->stream->FinishEvents();
+        co_return true;
     }
 
     void Complete(const std::shared_ptr<PendingOperation>& operation,

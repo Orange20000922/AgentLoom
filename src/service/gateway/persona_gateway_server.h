@@ -80,6 +80,7 @@ struct PersonaGatewayServerOptions {
     GatewayEmbeddingBatchOptions embedding_batch;
     persona::SessionOptions session;
     persona::PersonaRuntimeOptions runtime;
+    GatewayStreamingOptions streaming;
     std::optional<::net::StaticFileOptions> static_files;
     GatewayDocumentStoreOptions document_store;
     std::vector<PersonaMetadataRecord> default_personas;

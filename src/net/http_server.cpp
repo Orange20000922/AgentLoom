@@ -122,6 +122,7 @@ private:
 
 
 void HttpServer::HttpSession::DoRead() {
+    response_started_.store(false);
     request_ = {};
     request_parser_.emplace();
     request_parser_->body_limit(server_.options_.request_body_limit);
@@ -279,6 +280,7 @@ void HttpServer::HttpSession::OnWrite(bool keep_alive, beast::error_code ec, std
 }
 
 void HttpServer::HttpSession::Close(ConnectionCloseInfo close_info) {
+    NotifyEventStreamClosed(close_info.status);
     beast::error_code ec;
     stream_.socket().shutdown(tcp::socket::shutdown_send, ec);
     stream_.socket().close(ec);
@@ -286,6 +288,8 @@ void HttpServer::HttpSession::Close(ConnectionCloseInfo close_info) {
 }
 
 core::Status HttpServer::HttpSession::SendFromRequest(http::message_generator response) {
+    if (response_started_.exchange(true))
+        return core::Status::Error(core::ErrorCode::FailedPrecondition, "HTTP response already started");
     asio::post(stream_.get_executor(), [self = shared_from_this(), response = std::move(response)]() mutable {
         self->Send(std::move(response));
     });
@@ -436,6 +440,14 @@ void HttpServer::Stop() {
     }
     io_threads_.clear();
     listener_.reset();
+    std::vector<std::shared_ptr<HttpSession>> streams;
+    {
+        std::lock_guard lock(handler_mutex_);
+        for (auto& entry : event_streams_) if (auto session = entry.lock()) streams.push_back(std::move(session));
+        event_streams_.clear();
+    }
+    // IO 已收口，此处通知 SSE 消费者取消生成；避免 stop() 丢弃未执行的 socket callback。
+    for (auto& session : streams) session->Close(ConnectionCloseInfo::Shutdown("SSE server stopped"));
     connection_pool_.CloseAll(ConnectionCloseInfo::Shutdown("http server stopped"));
 }
 /**

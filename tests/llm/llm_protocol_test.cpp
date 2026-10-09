@@ -68,21 +68,20 @@ TEST(ChatCompletionsProtocolTest, PreservesExactRequestBytesAndCompleteResponse)
     EXPECT_EQ(response.tool_calls[0].arguments_json, R"({"q":"事实"})");
 }
 
-TEST(ChatCompletionsProtocolTest, ReportsWireCapabilitiesAndRejectsStreaming) {
+TEST(ChatCompletionsProtocolTest, ReportsWireCapabilitiesAndCreatesStreamingDecoder) {
     ChatCompletionsProtocol protocol;
     EXPECT_EQ(protocol.Endpoint(), "chat/completions");
     const auto caps = protocol.Capabilities();
     EXPECT_TRUE(caps.function_tools);
     EXPECT_TRUE(caps.image_inputs);
     EXPECT_TRUE(caps.reasoning_content);
-    EXPECT_FALSE(caps.streaming);
+    EXPECT_TRUE(caps.streaming);
     ChatCompletionRequest request;
     request.stream = true;
-    auto rejected = protocol.ValidateRequest(request);
-    EXPECT_EQ(rejected.code(), core::ErrorCode::InvalidArgument);
-    EXPECT_EQ(rejected.message(), "streaming completions are not implemented by this client");
+    EXPECT_TRUE(protocol.ValidateRequest(request).ok());
+    EXPECT_TRUE(protocol.CreateStreamDecoder(request, {}).ok());
+    request.n = 2;
     EXPECT_EQ(protocol.ValidateRequest(request).code(), core::ErrorCode::InvalidArgument);
-    EXPECT_EQ(protocol.CreateStreamDecoder(request, {}).status().code(), core::ErrorCode::Unimplemented);
 }
 
 TEST(ChatCompletionsProtocolTest, PreservesToolAssociationValidationAndLegacyEntryPoint) {

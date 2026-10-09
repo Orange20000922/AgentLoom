@@ -1,4 +1,5 @@
 #pragma once
+#include "chat_sse_registry.h"
 
 #include "classroom_scheduler.h"
 #include "gateway_models.h"
@@ -157,7 +158,8 @@ public:
                           IClassroomScheduler* classroom_scheduler = nullptr,
                           std::shared_ptr<IReportEvaluator> report_evaluator = nullptr,
                           std::shared_ptr<IPersonaMetadataStore> persona_metadata_store = nullptr,
-                          core::LoggerAdapter logger = core::LoggerAdapter::ForModule("service"));
+                          core::LoggerAdapter logger = core::LoggerAdapter::ForModule("service"),
+                          GatewayStreamingOptions streaming = {});
 
     core::Result<PersonaMetadataGatewayResponse> UpsertPersonaMetadata(PersonaMetadataGatewayRequest request);
     core::Result<PersonaMetadataGatewayResponse> GetPersonaMetadata(std::string_view tenant_id,
@@ -179,6 +181,12 @@ public:
                                                               std::string_view user_uuid,
                                                               std::string trace_id);
     core::Status SubmitChat(ChatGatewayRequest request, ChatCallback callback);
+    bool SupportsStreaming() const noexcept { return runtime_.SupportsStreaming(); }
+    IChatSseRegistry& ChatStreams() noexcept { return chat_streams_; }
+    const ::net::SseStreamOptions& StreamOptions() const noexcept { return streaming_.transport; }
+    core::Status CancelChat(std::string session_id, std::string owner, std::string trace_id) {
+        return interaction_.CancelTurn({std::move(session_id), std::move(trace_id), std::move(owner)});
+    }
     core::Status SubmitClassroomMessage(ClassroomMessageGatewayRequest request, ClassroomCallback callback);
     core::Status SubmitClassroomProactive(ClassroomProactiveGatewayRequest request, ClassroomCallback callback);
     core::Status SubmitClassroomPoll(ClassroomPollGatewayRequest request, ClassroomCallback callback);
@@ -204,6 +212,8 @@ private:
     std::shared_ptr<IReportEvaluator> report_evaluator_;
     std::shared_ptr<IPersonaMetadataStore> persona_metadata_store_;
     core::LoggerAdapter logger_;
+    GatewayStreamingOptions streaming_;
+    ChatSseRegistry chat_streams_;
 };
 
 }

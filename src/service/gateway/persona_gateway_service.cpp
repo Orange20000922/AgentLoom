@@ -722,14 +722,17 @@ PersonaGatewayService::PersonaGatewayService(persona::SessionManager& sessions,
                                              IClassroomScheduler* classroom_scheduler,
                                              std::shared_ptr<IReportEvaluator> report_evaluator,
                                              std::shared_ptr<IPersonaMetadataStore> persona_metadata_store,
-                                             core::LoggerAdapter logger)
+                                             core::LoggerAdapter logger,
+                                             GatewayStreamingOptions streaming)
     : sessions_(sessions),
       runtime_(runtime),
       interaction_(sessions, runtime, logger),
       classroom_scheduler_(classroom_scheduler),
       report_evaluator_(std::move(report_evaluator)),
       persona_metadata_store_(std::move(persona_metadata_store)),
-      logger_(std::move(logger)) {}
+      logger_(std::move(logger)),
+      streaming_(streaming),
+      chat_streams_(streaming.replay) {}
 
 core::Result<PersonaMetadataGatewayResponse> PersonaGatewayService::UpsertPersonaMetadata(
     PersonaMetadataGatewayRequest request) {
@@ -1107,6 +1110,8 @@ core::Status PersonaGatewayService::SubmitChat(ChatGatewayRequest request, ChatC
     chat.trace_id = request.trace_id;
     chat.model = request.model;
     chat.context_id = request.mode;
+    chat.stream = request.stream;
+    chat.event_sink = std::move(request.event_sink);
 
     auto status = interaction_.SubmitTurn(
         persona::PersonaTurnRequest{std::move(chat), request.authenticated_user_uuid},

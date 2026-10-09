@@ -20,10 +20,11 @@ struct LlmProtocolCapabilities {
 struct LlmProtocolContext {
     std::string default_model;
     CompletionResponseValidationOptions response_validation;
+    LlmStreamLimits stream_limits;
+    LlmEventSink event_sink;
 };
 
-// 为后续增量传输预留的逐请求解析器；输入视图仅在调用期间有效，实现需自有解析状态。
-// 本阶段没有生产流式实现，不把完整结果人为切片标记为 streaming。
+// 输入视图仅在调用期间有效；decoder 自有 SSE framing、JSON 聚合和终态状态。
 class ILlmStreamDecoder {
 public:
     virtual ~ILlmStreamDecoder() = default;
@@ -59,7 +60,7 @@ class ChatCompletionsProtocol final : public ILlmProtocol {
 public:
     std::string_view Endpoint() const noexcept override { return "chat/completions"; }
     LlmProtocolCapabilities Capabilities() const noexcept override {
-        return {.function_tools = true, .image_inputs = true, .reasoning_content = true};
+        return {.function_tools = true, .image_inputs = true, .reasoning_content = true, .streaming = true};
     }
     core::Status ValidateRequest(const ChatCompletionRequest& request) const override;
     core::Result<std::string> EncodeRequest(
@@ -67,6 +68,8 @@ public:
     core::Result<ChatCompletionResponse> DecodeResponse(
         std::string_view body, const ChatCompletionRequest& request,
         const LlmProtocolContext& context, core::LoggerAdapter& logger) const override;
+    core::Result<std::unique_ptr<ILlmStreamDecoder>> CreateStreamDecoder(
+        const ChatCompletionRequest& request, const LlmProtocolContext& context) const override;
 };
 
 }

@@ -7,6 +7,7 @@
 #include "protocol_types.h"
 #include "request_interfaces.h"
 #include "static_file_handler.h"
+#include "shared_buffer.h"
 #include "websocket_types.h"
 
 #include <boost/asio.hpp>
@@ -121,12 +122,14 @@ private:
     WebSocketAcceptHandler websocket_accept_handler_;
     WebSocketCloseHandler websocket_close_handler_;
     std::shared_ptr<StaticFileHandler> static_file_handler_;
+    std::vector<std::weak_ptr<HttpSession>> event_streams_;
     ConnectionPool connection_pool_;
     std::atomic<bool> running_{false};
     std::atomic<std::uint64_t> next_connection_id_{1};
     std::uint16_t bound_port_ = 0;
 };
-class HttpServer::HttpSession : public std::enable_shared_from_this<HttpSession> {
+class HttpServer::HttpSession : public IServerEventStream,
+                               public std::enable_shared_from_this<HttpSession> {
 public:
     class HttpServerRequest;
 
@@ -136,6 +139,15 @@ public:
     const ConnectionContext& connection() const noexcept;
     core::RawMemoryPool& memory_pool() noexcept;
     core::ThreadPool* task_pool() const noexcept;
+    core::Result<std::shared_ptr<IServerEventStream>> BeginEventStream(
+        SseStreamOptions options, EventStreamCloseCallback callback);
+    core::Status SendEvent(ServerSentEvent event) override;
+    void FinishEvents() override;
+    void AbortEvents(core::Status status) override;
+    core::Status AcknowledgeHeartbeat() override;
+    std::uint64_t stream_connection_id() const noexcept override { return sse_connection_id_; }
+    BackpressureStats EventQueueStats() const override;
+    void NotifyEventStreamClosed(core::Status status);
 
     HttpSession(HttpServer& server, tcp::socket socket, ConnectionLease lease)
         : server_(server),
@@ -147,12 +159,15 @@ public:
     }
 
 private:
+    friend class HttpServer;
     void DoRead();
     void OnRead(beast::error_code ec, std::size_t);
     void OnAccessDecision(AccessDecision decision);
     void Send(http::message_generator message);
     void OnWrite(bool keep_alive, beast::error_code ec, std::size_t);
     void Close(ConnectionCloseInfo close_info);
+    asio::awaitable<void> WriteEvents();
+    asio::awaitable<void> WatchEventPeer();
 
     HttpServer& server_;
     beast::tcp_stream stream_;
@@ -160,6 +175,18 @@ private:
     std::optional<http::request_parser<http::string_body>> request_parser_;
     BeastHttpRequest request_;
     ConnectionLease lease_;
+    std::atomic<bool> response_started_{false};
+    SseStreamOptions sse_options_;
+    EventStreamCloseCallback sse_close_callback_;
+    // 关闭租约会释放其内存池；SSE 自有池确保挂起的写协程仍持有有效缓冲区。
+    core::BucketMemoryPool sse_memory_pool_{0, 4};
+    std::unique_ptr<BackpressureQueue<SharedBuffer>> sse_queue_;
+    asio::steady_timer sse_wakeup_{stream_.get_executor()};
+    std::atomic<bool> sse_finished_{false};
+    std::atomic<bool> sse_closed_{false};
+    std::uint64_t sse_connection_id_ = 0;
+    std::chrono::steady_clock::time_point sse_started_at_;
+    std::chrono::steady_clock::time_point sse_last_activity_;
 };
 
 class HttpServer::HttpSession::HttpServerRequest final : public IHttpRequest {
@@ -190,6 +217,10 @@ public:
 
     void Close(ConnectionCloseInfo close_info) override {
         session_->CloseFromRequest(std::move(close_info));
+    }
+    core::Result<std::shared_ptr<IServerEventStream>> BeginEventStream(
+        SseStreamOptions options, EventStreamCloseCallback callback) override {
+        return session_->BeginEventStream(std::move(options), std::move(callback));
     }
 
 private:

@@ -82,6 +82,7 @@ struct ChatGatewayRequest {
     std::string message;
     std::string model;
     bool stream = false;
+    llm::LlmEventSink event_sink;
 };
 
 struct ChatGatewayResponse : GatewayEnvelopeBase {

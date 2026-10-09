@@ -66,6 +66,7 @@ Json BuildRequestJson(const ChatCompletionRequest& req, const std::string& defau
     j["top_p"] = req.top_p;
     j["n"] = req.n;
     j["stream"] = req.stream;
+    if (req.stream) j["stream_options"] = {{"include_usage", true}};
     if (!req.tools.empty()) {
         j["tools"] = Json::array();
         for (const auto& tool : req.tools) {
@@ -209,7 +210,8 @@ core::Result<ChatCompletionResponse> ParseResponse(
 
     if (resp.prompt_tokens < 0 || resp.completion_tokens < 0 || resp.total_tokens < 0 ||
         (resp.total_tokens > 0 &&
-         resp.total_tokens < resp.prompt_tokens + resp.completion_tokens)) {
+         static_cast<std::int64_t>(resp.total_tokens) <
+             static_cast<std::int64_t>(resp.prompt_tokens) + resp.completion_tokens)) {
         return core::Status::Error(core::ErrorCode::DataLoss,
                                    "LLM response contains inconsistent token usage");
     }
@@ -277,7 +279,7 @@ core::Status ChatCompletionsProtocol::ValidateRequest(const ChatCompletionReques
     const auto invalid = [](const char* reason) {
         return core::Status::Error(core::ErrorCode::InvalidArgument, reason);
     };
-    if (request.stream) return invalid("streaming completions are not implemented by this client");
+    if (request.stream && request.n != 1) return invalid("streaming requires a single output choice");
     if (request.tool_choice != "" && request.tool_choice != "none" &&
         request.tool_choice != "auto" && request.tool_choice != "required") {
         return invalid("unsupported tool_choice");

@@ -1,6 +1,7 @@
 # LLM 协议解耦与对话 Streaming 设计（2026-10）
 
-> 阶段 1–2：公共接口与 Chat Completions 协议抽取已实现；其余阶段仍按下文方案逐步评审。
+> 阶段 1–4 已实现：公共接口、Chat Completions 协议、协程增量 HTTP 与 Gateway HTTP SSE。
+> 当前接口、心跳/重连及验收边界见 [HTTP SSE 协议](LLM_HTTP_SSE_PROTOCOL.md)；阶段 5–6 仍是设计。
 
 ## 当前协议实现边界
 
@@ -15,10 +16,10 @@ Persona、Memory、Document、Skill、CloudTask 和 LocalLlm 已直接依赖公�
 | --- | --- |
 | `Endpoint()` | 提供相对 base URL 的 endpoint |
 | `Capabilities()` | 声明线协议可表达的工具、图片、reasoning 字段能力；不证明 Provider/模型支持 |
-| `ValidateRequest()` | 工具声明、批次关联及当前不支持 streaming 的拒绝校验 |
+| `ValidateRequest()` | 工具声明、批次关联及流式单 choice 约束 |
 | `EncodeRequest()` | 返回拥有独立存储的完整请求 body，保留原 JSON 序列化参数与字段布局 |
 | `DecodeResponse()` | 解析成功响应 body，保留 UTF-8、结束状态、工具调用、usage 与 token audit 校验 |
-| `CreateStreamDecoder()` | 逐请求 decoder 的扩展入口；当前返回 `Unimplemented`，尚未实现 streaming |
+| `CreateStreamDecoder()` | 每次生成独立的 SSE/Chat Completions 聚合器及事件 sink |
 
 协议接口不引用 HTTP DTO 或 I/O runtime。HTTP 客户端保留认证、超时、HTTP status 错误映射、
 同步/异步传输、重试和取消。非 200 响应在客户端映射成原有 `core::Status`，不交给协议解码。
@@ -34,7 +35,7 @@ options.protocol = protocol;  // 同步和异步 Create 均使用该字段。
 
 共享对象必须保持逻辑不可变；所有方法不得保存传入视图。新协议的 decoder 必须为每个请求独立创建。
 `reasoning_content` 字段仍原样透传，不转换成可见回答；其他协议的专属 continuation 尚未引入。
-本阶段保持原运行行为，没有 Responses、DSML、SSE、托管会话或工具循环预算实现。
+当前已实现 HTTP SSE 与已有两轮工具闭环；没有 Responses、DSML、托管会话或通用多轮工具预算实现。
 
 验证入口：`llm_protocol_test.cpp` 固定请求字节与结果字段、校验拒绝、HTTP 状态分工及协议注入；
 `llm_integration_e2e_test.cpp` 覆盖真实同步/异步 HTTP 的协议替换；安装包 consumer 覆盖新旧头文件共存及协议调用。
@@ -220,21 +221,64 @@ Gateway sink 通过现有有界队列转发，不能在模型 I/O callback 中�
 
 ## 5. Responses 与上下文策略的后续边界
 
-Responses 首期只增加协议实现，保持本地组装上下文；无状态模式仍需保留必要的输出 item 与 continuation。
-随后再讨论独立的上下文策略接口，支持本地重组或上游连续会话。
+### 5.1 协议选型裁决（2026-10，基于国产模型 Responses 支持调研）
 
-启用上游状态前必须定义：
+阶段 1–2 的协议多态已落地，`ILlmProtocol` 是可注入接缝，协议选择由配置静态解析装配（按模型名正则匹配）
+决定，不在请求级动态切换。在此基础上，三种协议的定位已从"后续边界"收敛为明确裁决：
 
-- Provider/account/model scope 与已提交游标；
-- 动态 Persona/情绪/检索事实的版本、失效和会话重建；
-- 缓存直返对上游会话的补齐；
-- 上游成功、本地失败时的恢复或分叉；
-- Provider 切换、超时不确定结果、checkpoint 与工具重放；
-- 数据保留、删除及权限变更后的上下文处理。
+**Chat Completions —— 默认/兜底协议。** 覆盖 OpenAI-compatible 全生态与本地 `LocalLlmChatClient`（语义对齐但不
+走 HTTP）。Tool-calling 两轮闭环已验证。没有特殊理由的 Provider 都落到这里。
 
-L3 长期事实、RAG 语料和 Skill 生命周期保持独立职责。
-托管检索属于另一阶段能力，不能由 Responses 接口可用直接推导。
-本地 Context 与上游会话以同模型、同输入开展质量、恢复、延迟与成本对照后，再决定缩减哪些模块。
+**无状态 Responses —— 条件触发的并行协议实现，不是顺序排队的备选。** 触发条件是 Provider/模型级的：
+某条 Provider 接的是需要 reasoning continuation 和 item 化输出的模型，Chat Completions 承载不了，就给该
+client 实例注入 `ResponsesProtocol`。业务模块不感知，因为它们只依赖协议无关 DTO。
+
+国产模型 Responses API 支持矩阵（经查证，作为无状态 Responses 值得做的旁证）：
+
+| Provider | Chat Completions | 无状态 Responses | 有状态 Responses |
+| --- | --- | --- | --- |
+| DeepSeek | ✅ | ✅ | — |
+| Kimi（月之暗面） | ✅ | ✅（`previous_response_id` 固定 null、`store` 固定 false） | ❌ 明确只做无状态子集 |
+| 豆包（火山方舟） | ✅ | ✅（板块最全：迁移/深度思考/多模态/工具调用/结构化输出/上下文编辑） | 待实测 |
+| 通义千问（百炼） | ✅ | ✅（`previous_response_id` 官方建议手动组装历史） | ❌ 建议手动组装 |
+| 智谱 GLM | ✅（`/paas/v4/chat/completions`，有 `tool_stream`） | ❌ 暂无 Responses 端点 | ❌ |
+
+有状态 Responses（`previous_response_id` / `store`）被 Kimi/通义集体只做无状态子集，基本只有 OpenAI 自家在推。
+这给有状态 Responses 的否决提供了市场旁证。
+
+各厂商 Responses 实现存在方言落差，验证设计约定 §3.2"不能从 OpenAI-compatible 或 `/responses` 可访问推导出
+持久状态、strict schema、streaming 全部可用"：Kimi 的 `tool_choice` 只支持 `auto`、`custom` 工具只认
+`apply_patch`、图片只收 data URL、`temperature`/`top_p` 请求体不暴露、显式缓存断点直接 400；通义 Chat Completions
+路径下 `tools` 与 `stream=True` 有兼容限制。这些方言差异应由配置声明 + 集成测试验证，不写死在协议实现里。
+`LlmProtocolCapabilities` 目前是协议自己声明线格式能力，将来可能要拆成"协议能力 ∧ Provider 覆盖"两层。
+
+**有状态 Responses —— 架构否决，不是条件触发。** 它的冲突不在协议层，而在上下文事实源：把对话状态外移到
+Provider，绕过 `fencing_token` / `runtime_revision` / idle cleanup 整套可回收投影模型，制造第二个不受
+Runtime 控制的上下文事实源。协议解耦解决不了这个——可以很容易加一个 `StatefulResponsesProtocol`，但它引入
+的第二事实源问题依然存在。在"上下文完全控制 + 可回收 Runtime"的需求下（见两级 Session 架构
+`SESSION_ARCHITECTURE.md` §2.1"两级 Session 不是两个平级事实源"），它被从路由策略里排除。加上生态层面只有
+OpenAI 自家在推，绑死单一 Provider，不做。
+
+### 5.2 无状态 Responses 的设计后果
+
+无状态 Responses 落地后会逼出一个既有欠账：**输出 item / reasoning continuation 的持久化边界**。每次请求要
+把上轮的 output item 回传进 `input`，这意味着 Session 历史要能存这些不透明载荷并受大小约束。这不是协议层的活，
+是 Session 持久化契约的活（见 `SESSION_PERSISTENCE_CONTRACTS_2026_08.md`），建议在阶段 5 动工前先评审。
+
+Reasoning item 是多轮工具循环的正解。Chat Completions 下 DeepSeek 的 `reasoning_content` 只能透传、无法回传
+续接；Responses 的 item 模型里 reasoning 是结构化输出项，多轮工具循环时可以随 `input` 回传。这对接 §4.3 的
+多轮循环预算是绕不开的载体。
+
+事件模型上，Responses 的 SSE 事件（`response.output_text.delta`、`response.output_item.done`、
+`response.completed`）与 §3.4 规划的事件 sink（`TextDelta` / `OutputItemCompleted` / `GenerationCompleted`）
+天然映射，比 Chat Completions 从 `choices[].delta` 凑更干净。阶段 3 的 SSE framing 是共享组件，Responses
+decoder 落地后事件侧能复用。
+
+### 5.3 阶段 6 的状态
+
+阶段 6（托管上下文）原为"后续边界"。鉴于 §5.1 已将有状态 Responses 判为架构否决，阶段 6 从"后续边界"改为
+"当前裁决不做"，保留本文作为否决记录。若未来 Provider 生态发生根本变化（多厂商广泛支持有状态 Responses 且
+提供可靠的数据保留/删除/权限变更契约），可重新评审。
 
 ## 6. 分阶段迁移与验收
 
@@ -243,8 +287,8 @@ L3 长期事实、RAG 语料和 Skill 生命周期保持独立职责。
 | 0：参考 Gateway 接线（已实现） | factory/coordinator 注入及默认组装 | 同步/异步工具 follow-up、未注册错误、真实 HTTP 闭环 |
 | 1：公共接口抽离（已实现） | 公共 DTO/client/operation 与具体 Provider 头文件分离 | 现有客户端、Persona、Memory、Document、Skill 行为回归及 SDK consumer 构建 |
 | 2：协议实现抽离（已实现） | Chat Completions 编解码改为协议多态，同步/异步共用 | 请求线格式、校验、错误、UTF-8、工具关联和用量回归 |
-| 3：出站流式基础 | 增量 HTTP、SSE framing、Chat Completions decoder | 任意分块、跨 UTF-8、CRLF/多行事件、损坏输入、缺失终态、取消、deadline |
-| 4：端到端 streaming | Persona/Interaction sink、Gateway 事件输出 | 首片段可见、慢客户端、断开、工具中间文本、同 Session 保序、单次 commit |
+| 3：出站流式基础（已实现） | 协程增量 HTTP、SSE framing、Chat Completions decoder | 任意分块、跨 UTF-8、CRLF/多行事件、损坏输入、缺失终态、取消、deadline |
+| 4：端到端 streaming（已实现） | Persona/Interaction sink、Gateway HTTP SSE、有界重放 | 首片段可见、背压、断开/重连、工具前文本暂存、同 Session 保序、单次 commit |
 | 5：Responses 适配 | 新协议实现、output item/reasoning/工具结果映射 | 实际 Provider 能力、完整与流式协议一致性、旧协议回归 |
 | 6：托管上下文 | 状态策略、恢复契约及可选托管检索 | A/B 质量、旧证据失效、缓存补齐、切换恢复和工具副作用 |
 
@@ -264,7 +308,11 @@ HTTP SSE 若同时需要，应单独核实入站 Server 的分块发送与关闭
 慢消费者队列峰值及内存占用。复用现有 Fake LLM/延迟服务扩展流式测试输入，真实 Provider 作为兼容验收。
 新增压测遵守仓库既有性能报告边界，不把 Mock 延迟或单次实验当成生产容量保证。
 
-## 7. 需要讨论的决策
+## 7. 设计阶段的决策记录
+
+阶段 3–4 已冻结：HTTP SSE 为首期 transport；sink 与 completion 分离；断连取消、有界队列
+失败收口、工具首轮文本暂存；Memory Admission 保留既有异步策略；先覆盖已有两轮工具闭环。
+下列条目保留原设计讨论脉络，实际协议以 [HTTP SSE 协议](LLM_HTTP_SSE_PROTOCOL.md) 为准。
 
 1. 公共 LLM 模型先抽出已有类型并保留别名，还是同时引入有序 item？建议先抽离，随后按 streaming 必需项扩展。
 2. 事件 sink 与最终 completion 是否分开？建议分开，以区分可见增量与已提交 Turn。
@@ -274,4 +322,4 @@ HTTP SSE 若同时需要，应单独核实入站 Server 的分块发送与关闭
 6. 多轮工具循环是否与首期 streaming 同时交付？建议先保证已有两轮闭环可流式运行，再独立扩展循环预算。
 7. Responses 的上游会话状态是否独立验收？建议保持独立，避免协议切换同时改变上下文来源。
 
-阶段 1–2 的实际接口见文首；后续 streaming 事件、提交和上游状态决策仍需独立评审。
+阶段 1–4 的实际接口见文首及 HTTP SSE 协议；上游状态与 Responses 决策仍需独立评审。
