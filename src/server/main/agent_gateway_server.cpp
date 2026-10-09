@@ -418,7 +418,8 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config,
         if (!async_cloud.ok()) {
             return async_cloud.status();
         }
-        struct AsyncClientWithTransport final : public agent::llm::IAsyncLlmClient {
+        struct AsyncClientWithTransport final : public agent::llm::IAsyncLlmClient,
+                                                public agent::llm::IAsyncStreamingLlmClient {
             std::shared_ptr<agent::net::IAsyncHttpClient> transport;
             std::unique_ptr<agent::llm::OpenAiAsyncLlmClient> client;
 
@@ -426,6 +427,10 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config,
                 agent::llm::ChatCompletionRequest request,
                 Callback callback) override {
                 return client->CompleteAsync(std::move(request), std::move(callback));
+            }
+            core::Result<std::shared_ptr<agent::llm::IAsyncLlmOperation>> CompleteStreamingAsync(
+                agent::llm::ChatCompletionRequest request, agent::llm::LlmEventSink sink, Callback callback) override {
+                return client->CompleteStreamingAsync(std::move(request), std::move(sink), std::move(callback));
             }
         };
         auto async_holder = std::make_shared<AsyncClientWithTransport>();

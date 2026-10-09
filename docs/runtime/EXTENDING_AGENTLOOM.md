@@ -168,8 +168,12 @@ dependencies.report_evaluator = std::make_shared<CommercialReportEvaluator>(/* .
 
 旧消费者仍可包含 `openai_llm_client.h` 取得原公共名称与函数。新增协议字段要求 SDK 与消费者一起重编译。
 `Capabilities()` 表示协议可表达的能力，实际 Provider/模型能力另行验证。
-streaming decoder 扩展入口目前返回 `Unimplemented`，完整客户端仍拒绝 `stream=true`；
-此接口抽取不代表 Responses 或流式输出已经可用。
+`ChatCompletionsProtocol::CreateStreamDecoder` 已实现逐请求 SSE 聚合与事件。
+流式消费者使用独立的 `IAsyncStreamingLlmClient::CompleteStreamingAsync`；
+完整接口仍拒绝 `stream=true`，避免返回不完整或伪造的增量。
+HTTP transport 的所有权包装器必须同时转发 streaming capability；仅转发旧接口会隐藏该能力。
+Gateway HTTP SSE、心跳、pong、Last-Event-ID 与背压契约见
+[HTTP SSE 协议](../architecture/LLM_HTTP_SSE_PROTOCOL.md)。Responses 仍未实现。
 
 ### Persona Turn 取消
 

@@ -24,7 +24,7 @@ struct AsyncBeastHttpClientOptions {
 };
 
 /// 共享 io_context 的真正异步 HTTP/HTTPS 客户端；HTTP/1.1 连接按 origin 安全复用。
-class AsyncBeastHttpClient final : public IAsyncHttpClient {
+class AsyncBeastHttpClient final : public IAsyncHttpClient, public IAsyncStreamingHttpClient {
 public:
     struct Impl;
 
@@ -35,6 +35,8 @@ public:
     core::Result<std::shared_ptr<IAsyncHttpOperation>> ExecuteAsync(
         HttpClientRequest request,
         Callback callback) override;
+    core::Result<std::shared_ptr<IAsyncHttpOperation>> ExecuteStreamingAsync(
+        HttpClientRequest request, HttpStreamOptions options, HttpStreamCallbacks callbacks) override;
 
     /// 幂等关闭：拒绝新请求、取消在途请求、等待回调收口并回收 io_context 线程。
     void Shutdown() noexcept;

@@ -1,4 +1,5 @@
 #include "persona_gateway_route_helpers.h"
+#include "chat_sse_routes.h"
 
 namespace agent::service::gateway {
 namespace {
@@ -235,6 +236,10 @@ DECLARE_AUTHENTICATED_HTTP_ROUTE(ChatMessageRoute, ::net::http::verb::post, "api
     req.message = context.body.value("message", std::string{});
     req.model = context.body.value("model", std::string{});
     req.stream = context.body.value("stream", false);
+    if (req.stream) {
+        HandleChatSse(context, std::move(req));
+        return;
+    }
     auto trace_id = context.trace_id;
     auto request = context.request;
     auto status = context.service.SubmitChat(

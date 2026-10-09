@@ -25,6 +25,7 @@ add_library(agent_agent_runtime STATIC
     src/service/persona/gateway_session_affinity_scheduler.cpp
     src/service/persona/gateway_session_affinity_scheduler.h
     src/service/persona/persona_runtime.cpp
+    src/service/persona/persona_runtime_llm_async.cpp
     src/service/persona/persona_runtime.h
     src/service/persona/skill_session_manager.cpp
     src/service/persona/skill_session_manager.h
@@ -165,6 +166,8 @@ add_library(agent_gateway_server_lib STATIC
     src/service/gateway/persona_gateway_route_core.h
     src/service/gateway/persona_gateway_route_helpers.h
     src/service/gateway/persona_gateway_service.cpp
+    src/service/gateway/chat_sse_registry.cpp
+    src/service/gateway/chat_sse_registry.h
     src/service/gateway/persona_gateway_service.h
     src/service/gateway/report_evaluator.h
     src/service/gateway/persona_gateway_server.cpp
@@ -212,6 +215,8 @@ endif()
 
 add_library(agent_agent_gateway STATIC
     src/service/gateway/persona_gateway_agent_routes.cpp
+    src/service/gateway/chat_sse_routes.cpp
+    src/service/gateway/chat_sse_routes.h
     src/service/gateway/persona_gateway_route_core.h
     src/service/gateway/persona_gateway_route_helpers.h
 )
@@ -356,6 +361,8 @@ if(BERT_BUILD_TESTS)
     )
 
     function(agentloom_configure_service_test_target target labels)
+        # GoogleTest discovery 会再解析属性列表；转义分号，保留整个 LABELS 值。
+        string(REPLACE ";" "\\;" escaped_labels "${labels}")
         target_include_directories(${target} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         copy_runtime_files(${target} "${BERT_SQLITE_DLL}")
@@ -363,7 +370,7 @@ if(BERT_BUILD_TESTS)
         copy_runtime_files(${target} ${VCPKG_RUNTIME_DLLS})
         gtest_discover_tests(${target}
             DISCOVERY_MODE PRE_TEST
-            PROPERTIES LABELS "${labels}")
+            PROPERTIES LABELS "${escaped_labels}")
     endfunction()
 
     add_executable(persona_runtime_tests
@@ -391,6 +398,8 @@ if(BERT_BUILD_TESTS)
             tests/service/gateway_foundation_test.cpp
             tests/service/persona_gateway_service_test.cpp
             tests/service/persona_gateway_tool_calling_test.cpp
+            tests/service/chat_sse_registry_test.cpp
+            tests/service/persona_gateway_streaming_test.cpp
         )
         target_link_libraries(gateway_service_tests PRIVATE
             agent_service

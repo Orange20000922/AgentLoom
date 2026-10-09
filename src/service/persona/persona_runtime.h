@@ -191,6 +191,8 @@ struct ChatRequest {
     std::string context_id;
     std::optional<GenerationParams> generation_override;
     std::string model;
+    bool stream = false;
+    llm::LlmEventSink event_sink;
 };
 
 struct ChatLatencyBreakdown {
@@ -313,6 +315,9 @@ public:
     /// @param request 本轮 session、输入、trace 和生成参数。
     /// @param callback 完成回调，不得为空；可能在线程池工作线程执行。
     core::Status SubmitChat(ChatRequest request, ChatCallback callback);
+    bool SupportsStreaming() const noexcept {
+        return dynamic_cast<llm::IAsyncStreamingLlmClient*>(async_llm_client_.get()) != nullptr;
+    }
     /// 停止异步 admission，等待 memory continuation，并取消在途 LLM 后收口 Session commit。
     void Shutdown() noexcept;
 
@@ -445,6 +450,8 @@ private:
     std::shared_ptr<IAsyncEmotionAnalyzer> async_emotion_analyzer_;
     std::shared_ptr<llm::ILlmClient> llm_client_;
     std::shared_ptr<llm::IAsyncLlmClient> async_llm_client_;
+    // 可选借用线程池；组合根负责所有权，生命周期须覆盖 Shutdown 与全部 continuation。
+    // nullptr 表示直接运行 continuation，保留指针形式以兼容既有注入接口。
     core::ThreadPool* continuation_pool_ = nullptr;
     std::shared_ptr<IAnswerCacheProvider> answer_cache_provider_;
     std::shared_ptr<IToolMemoryProvider> tool_memory_provider_;

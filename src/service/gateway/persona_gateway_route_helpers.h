@@ -31,6 +31,8 @@ static std::string ErrorCodeName(core::ErrorCode code) {
     case core::ErrorCode::Timeout: return "TIMEOUT";
     case core::ErrorCode::InternalError: return "INTERNAL_ERROR";
     case core::ErrorCode::DataLoss: return "DATA_LOSS";
+    case core::ErrorCode::Cancelled: return "CANCELLED";
+    case core::ErrorCode::Unimplemented: return "UNIMPLEMENTED";
     default: return "UNKNOWN";
     }
 }
@@ -45,6 +47,7 @@ static ::net::http::status HttpStatusFor(core::ErrorCode code) {
     case core::ErrorCode::ResourceExhausted: return ::net::http::status::too_many_requests;
     case core::ErrorCode::Unavailable: return ::net::http::status::service_unavailable;
     case core::ErrorCode::Timeout: return ::net::http::status::gateway_timeout;
+    case core::ErrorCode::Unimplemented: return ::net::http::status::not_implemented;
     default: return ::net::http::status::internal_server_error;
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "result.h"
+#include <algorithm>
 
 #include <cstddef>
 #include <deque>
@@ -22,6 +23,8 @@ struct BackpressureStats {
     std::size_t popped_items = 0;
     std::size_t rejected_items = 0;
     bool closed = false;
+    std::size_t peak_queued_items = 0;
+    std::size_t peak_queued_bytes = 0;
 };
 
 template <typename T>
@@ -46,13 +49,16 @@ public:
             ++rejected_items_;
             return core::Status::Error(core::ErrorCode::ResourceExhausted, "backpressure item limit reached");
         }
-        if (options_.max_bytes > 0 && queued_bytes_ + item_size > options_.max_bytes) {
+        if (options_.max_bytes > 0 && (item_size > options_.max_bytes ||
+                                      queued_bytes_ > options_.max_bytes - item_size)) {
             ++rejected_items_;
             return core::Status::Error(core::ErrorCode::ResourceExhausted, "backpressure byte limit reached");
         }
 
         queued_bytes_ += item_size;
         queue_.push_back(Entry{std::move(value), item_size});
+        peak_queued_items_ = std::max(peak_queued_items_, queue_.size());
+        peak_queued_bytes_ = std::max(peak_queued_bytes_, queued_bytes_);
         ++pushed_items_;
         return core::Status::Ok();
     }
@@ -81,7 +87,8 @@ public:
 
     BackpressureStats Stats() const {
         std::lock_guard lock(mutex_);
-        return {queue_.size(), queued_bytes_, pushed_items_, popped_items_, rejected_items_, closed_};
+        return {queue_.size(), queued_bytes_, pushed_items_, popped_items_, rejected_items_, closed_,
+                peak_queued_items_, peak_queued_bytes_};
     }
 
 private:
@@ -99,6 +106,8 @@ private:
     std::size_t popped_items_ = 0;
     std::size_t rejected_items_ = 0;
     bool closed_ = false;
+    std::size_t peak_queued_items_ = 0;
+    std::size_t peak_queued_bytes_ = 0;
 };
 
 } // namespace net

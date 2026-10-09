@@ -4,6 +4,8 @@
 
 ## 当前基线
 
+- [HTTP SSE 验证与压测（2026-10，Fake CUDA L0 阶梯与容量边界）](HTTP_SSE_STREAMING_REPORT_2026_10.md)
+
 - [Agent Runtime E2E 压测与优化报告（2026-08）](AGENT_RUNTIME_E2E_PERFORMANCE_REPORT_2026_08.md)
 - [Benchmark Architecture Decision (2026-08)](BENCHMARK_ARCHITECTURE_DECISION_2026_08.md)
 - [Gateway Session Affinity A/B](GATEWAY_SESSION_AFFINITY_BENCHMARK.md)

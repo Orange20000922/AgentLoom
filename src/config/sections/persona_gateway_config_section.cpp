@@ -342,6 +342,28 @@ void PersonaGatewayConfigSection::LoadJson(const Json& root, MultimodalServerOpt
     SetSize(*section, Name(), "session_max_active_sessions", options.persona_gateway.session_max_active_sessions, 1);
     SetSize(*section, Name(), "runtime_recent_raw_turns", options.persona_gateway.runtime_recent_raw_turns, 1);
     SetString(*section, Name(), "runtime_default_model", options.persona_gateway.runtime_default_model);
+    if (const Json* streaming = FindField(*section, Name(), "streaming")) {
+        if (!streaming->is_object()) throw std::runtime_error("persona_gateway.streaming must be an object");
+        auto& value = options.persona_gateway.streaming;
+        SetSize(*streaming, "streaming", "max_pending_events", value.transport.outbound.max_items, 1);
+        SetSize(*streaming, "streaming", "max_pending_bytes", value.transport.outbound.max_bytes, 1);
+        SetSize(*streaming, "streaming", "max_event_bytes", value.transport.max_event_bytes, 1);
+        SetSize(*streaming, "streaming", "max_replay_turns", value.max_replay_turns, 1);
+        SetSize(*streaming, "streaming", "max_replay_events", value.max_replay_events, 1);
+        SetSize(*streaming, "streaming", "max_replay_bytes", value.max_replay_bytes, 1);
+        SetInt(*streaming, "streaming", "replay_retention_ms", value.replay_retention_ms, 1, 3600000);
+        SetBool(*streaming, "streaming", "require_pong", value.transport.require_pong);
+        const auto load_duration = [&](const char* name, std::chrono::milliseconds& target) {
+            auto ms = static_cast<int>(target.count());
+            SetInt(*streaming, "streaming", name, ms, 1, 3600000);
+            target = std::chrono::milliseconds(ms);
+        };
+        load_duration("heartbeat_interval_ms", value.transport.heartbeat_interval);
+        load_duration("idle_timeout_ms", value.transport.idle_timeout);
+        load_duration("max_duration_ms", value.transport.max_duration);
+        load_duration("write_timeout_ms", value.transport.write_timeout);
+        SetInt(*streaming, "streaming", "reconnect_delay_ms", value.transport.reconnect_delay_ms, 0, 3600000);
+    }
     if (const Json* filter = FindField(*section, Name(), "request_filter")) {
         if (!filter->is_object()) {
             throw std::runtime_error("persona_gateway.request_filter must be an object");
@@ -410,6 +432,8 @@ bool PersonaGatewayConfigSection::LoadCli(CliCursor& cursor, MultimodalServerOpt
 
 void PersonaGatewayConfigSection::Validate(MultimodalServerOptions& options) const {
     auto& gateway = options.persona_gateway;
+    if (gateway.streaming.transport.idle_timeout <= gateway.streaming.transport.heartbeat_interval)
+        throw std::runtime_error("persona_gateway.streaming idle_timeout_ms must exceed heartbeat_interval_ms");
     ValidateThreadPool("compute_pool", gateway.compute_pool);
     ValidateThreadPool("io_pool", gateway.io_pool);
     if (gateway.llm_pool) {

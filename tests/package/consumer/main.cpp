@@ -93,6 +93,14 @@ int main() {
         R"({"choices":[{"message":{"content":"SDK reply"}}]})",
         llm_request, {}, protocol_logger);
     if (!decoded.ok() || decoded.value().content != "SDK reply") return 10;
+    // 安装包必须包含 SSE framing 的链接依赖与 decoder 工厂，不只验证头文件存在。
+    llm_request.stream = true;
+    auto stream_decoder = protocol.CreateStreamDecoder(llm_request, {});
+    if (!protocol.Capabilities().streaming || !stream_decoder.ok()) return 11;
+    auto stream_status = stream_decoder.value()->Feed(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"SDK stream\"},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n");
+    if (!stream_status.ok() || !stream_decoder.value()->Finish().ok()) return 12;
 
     core::BucketMemoryPool pool;
     auto block = pool.allocate(256);

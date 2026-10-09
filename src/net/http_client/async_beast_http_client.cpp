@@ -2,6 +2,7 @@
 #include "url_parser.h"
 
 #include "logger_adapter.h"
+#include "../shared_buffer.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -172,7 +174,10 @@ HttpClientResponse ConvertResponse(http::response<http::string_body>& response) 
 }
 
 core::Status TransportError(std::string_view stage, const beast::error_code& error) {
-    if (error == http::error::partial_message || error == http::error::unexpected_body) {
+    if (error == http::error::body_limit || error == http::error::header_limit)
+        return core::Status::Error(core::ErrorCode::ResourceExhausted, "HTTP response exceeds limit");
+    if (error == http::error::partial_message || error == http::error::unexpected_body ||
+        error == http::error::bad_chunk || error == http::error::bad_chunk_extension) {
         return core::Status::Error(
             core::ErrorCode::DataLoss,
             std::string(stage) + ": incomplete or malformed HTTP message: " + error.message());
@@ -353,6 +358,7 @@ struct AsyncBeastHttpClient::Impl final
     asio::io_context io_context;
     WorkGuard guard;
     core::LoggerAdapter logger;
+    core::BucketMemoryPool stream_memory_pool;
 
     std::mutex mutex;
     bool stopping = false;
@@ -377,13 +383,14 @@ public:
           url_(std::move(url)),
           request_(BuildRequest(url_, request)),
           timeout_(std::chrono::milliseconds(request.timeout_ms)),
-          resolver_(owner_->io_context),
-          deadline_(owner_->io_context),
+          strand_(asio::make_strand(owner_->io_context)),
+          resolver_(strand_),
+          deadline_(strand_),
           callback_(std::move(callback)) {}
 
     void Start() noexcept {
         auto self = shared_from_this();
-        asio::post(owner_->io_context, [self] {
+        asio::post(strand_, [self] {
             if (self->completed_.load(std::memory_order_acquire)) {
                 return;
             }
@@ -414,7 +421,7 @@ public:
             return;
         }
         auto self = shared_from_this();
-        asio::post(owner_->io_context, [self] {
+        asio::post(strand_, [self] {
             if (self->completed_.load(std::memory_order_acquire)) {
                 return;
             }
@@ -430,6 +437,8 @@ protected:
     virtual void CloseTransport() noexcept = 0;
 
     AsyncBeastHttpClient::Impl& owner() noexcept { return *owner_; }
+    auto executor() const { return strand_; }
+    bool completed() const noexcept { return completed_.load(std::memory_order_acquire); }
 
     void StartDeadline() {
         deadline_.expires_after(timeout_);
@@ -502,6 +511,7 @@ private:
     ParsedUrl url_;
     http::request<http::string_body> request_;
     std::chrono::milliseconds timeout_;
+    asio::strand<asio::io_context::executor_type> strand_;
     tcp::resolver resolver_;
     asio::steady_timer deadline_;
     beast::flat_buffer buffer_;
@@ -699,6 +709,136 @@ private:
 
 }
 
+namespace {
+
+// 新的增量路径使用协程；仍登记在既有 operation 表，共享 TLS、连接池和取消收口。
+template <typename Connection>
+class StreamingHttpOperation final : public AsyncHttpOperationBase {
+public:
+    StreamingHttpOperation(std::shared_ptr<AsyncBeastHttpClient::Impl> owner, ParsedUrl url,
+                           HttpClientRequest request, HttpStreamOptions options, HttpStreamCallbacks callbacks)
+        : AsyncHttpOperationBase(owner, std::move(url), std::move(request),
+            [complete = callbacks.on_complete](core::Result<HttpClientResponse> result) {
+                complete(result.ok() ? core::Status::Ok() : result.status());
+            }), options_(options), callbacks_(std::move(callbacks)), idle_timer_(executor()) {}
+
+private:
+    void StartOnIoThread() override {
+        auto self = std::static_pointer_cast<StreamingHttpOperation>(shared_from_this());
+        asio::co_spawn(executor(), Run(), [self](std::exception_ptr error) {
+            if (error) {
+                self->Finish(core::Status::Error(core::ErrorCode::InternalError,
+                                                "HTTP streaming coroutine failed"));
+            }
+        });
+    }
+
+    void ArmIdle() {
+        idle_timer_.expires_after(options_.idle_timeout);
+        auto self = std::static_pointer_cast<StreamingHttpOperation>(shared_from_this());
+        idle_timer_.async_wait([self](beast::error_code error) {
+            if (error || self->completed()) return;
+            self->Finish(core::Status::Error(core::ErrorCode::Timeout, "HTTP stream idle timeout"));
+        });
+    }
+
+    asio::awaitable<void> Run() {
+        StartDeadline();
+        const auto origin = MakeOriginKey(url());
+        connection_ = owner().AcquireIdle<Connection>(origin);
+        const bool reused = static_cast<bool>(connection_);
+        if (!reused) {
+            if constexpr (std::is_same_v<Connection, TlsPooledConnection>) {
+                connection_ = std::make_shared<Connection>(owner().io_context, origin,
+                                                          owner().options.tls_context->asio_context());
+                if (auto status = owner().options.tls_context->PrepareConnection(
+                        connection_->stream.native_handle(), url().host); !status.ok()) {
+                    Finish(status);
+                    co_return;
+                }
+            } else {
+                connection_ = std::make_shared<Connection>(owner().io_context, origin);
+            }
+        }
+        beast::error_code error;
+        if (!reused) {
+            auto endpoints = co_await resolver().async_resolve(url().host, std::to_string(url().port),
+                asio::redirect_error(asio::use_awaitable, error));
+            if (completed() || HandleTransportError("stream DNS resolve", error)) co_return;
+            co_await beast::get_lowest_layer(connection_->stream).async_connect(endpoints,
+                asio::redirect_error(asio::use_awaitable, error));
+            if (completed() || HandleTransportError("stream TCP connect", error)) co_return;
+            if constexpr (std::is_same_v<Connection, TlsPooledConnection>) {
+                co_await connection_->stream.async_handshake(ssl::stream_base::client,
+                    asio::redirect_error(asio::use_awaitable, error));
+                if (completed() || HandleTransportError("stream TLS handshake", error)) co_return;
+            }
+        }
+        co_await http::async_write(connection_->stream, request(),
+            asio::redirect_error(asio::use_awaitable, error));
+        if (completed() || HandleTransportError("stream HTTP write", error)) co_return;
+        ArmIdle();
+        http::response_parser<http::buffer_body> parser;
+        parser.body_limit(options_.max_body_bytes);
+        parser.header_limit(16 * 1024);
+        co_await http::async_read_header(connection_->stream, buffer(), parser,
+            asio::redirect_error(asio::use_awaitable, error));
+        if (completed() || HandleTransportError("stream HTTP headers", error)) co_return;
+        HttpClientResponse headers;
+        headers.status = static_cast<int>(parser.get().result_int());
+        for (const auto& field : parser.get())
+            headers.headers.push_back({std::string(field.name_string()), std::string(field.value())});
+        if (auto status = callbacks_.on_headers(headers); !status.ok()) {
+            Finish(status);
+            co_return;
+        }
+        auto allocated = ::net::SharedBuffer::AllocateCapacity(owner().stream_memory_pool,
+                                                               options_.read_buffer_bytes);
+        if (!allocated.ok()) {
+            Finish(allocated.status());
+            co_return;
+        }
+        auto chunk = std::move(allocated).value();
+        while (!parser.is_done()) {
+            // Beast buffer_body 必须借用可写裸缓冲区；池化块由协程局部 RAII 对象跨 await 持有。
+            parser.get().body().data = chunk.char_data();
+            parser.get().body().size = chunk.capacity();
+            co_await http::async_read_some(connection_->stream, buffer(), parser,
+                asio::redirect_error(asio::use_awaitable, error));
+            if (completed()) co_return;
+            const auto bytes = chunk.capacity() - parser.get().body().size;
+            if (error == http::error::need_buffer) error.clear();
+            if (HandleTransportError("stream HTTP body", error)) co_return;
+            if (bytes) {
+                ArmIdle();
+                if (auto status = callbacks_.on_body({chunk.char_data(), bytes}); !status.ok()) {
+                    Finish(status);
+                    co_return;
+                }
+            }
+        }
+        beast::error_code ignored;
+        idle_timer_.cancel(ignored);
+        if (request().keep_alive() && parser.get().keep_alive() && buffer().size() == 0)
+            owner().ReleaseIdle(std::move(connection_));
+        Finish(HttpClientResponse{});
+    }
+
+    void CloseTransport() noexcept override {
+        beast::error_code ignored;
+        idle_timer_.cancel(ignored);
+        // 取消时只关闭 socket；协程及底层 awaitable 仍持有 stream，不能提前销毁连接对象。
+        if (connection_) connection_->Close();
+    }
+
+    HttpStreamOptions options_;
+    HttpStreamCallbacks callbacks_;
+    asio::steady_timer idle_timer_;
+    std::shared_ptr<Connection> connection_;
+};
+
+}
+
 void AsyncBeastHttpClient::Impl::Shutdown() noexcept {
     std::vector<std::shared_ptr<AsyncHttpOperationBase>> pending;
     std::vector<std::shared_ptr<PooledConnection>> idle;
@@ -820,6 +960,33 @@ core::Result<std::shared_ptr<IAsyncHttpOperation>> AsyncBeastHttpClient::Execute
         return core::Status::Error(
             core::ErrorCode::InternalError,
             std::string("failed to submit async HTTP request: ") + error.what());
+    }
+}
+
+core::Result<std::shared_ptr<IAsyncHttpOperation>> AsyncBeastHttpClient::ExecuteStreamingAsync(
+    HttpClientRequest request, HttpStreamOptions options, HttpStreamCallbacks callbacks) {
+    if (!callbacks.on_headers || !callbacks.on_body || !callbacks.on_complete ||
+        request.timeout_ms <= 0 || !options.max_body_bytes || !options.read_buffer_bytes ||
+        options.read_buffer_bytes > options.max_body_bytes || options.idle_timeout.count() <= 0)
+        return core::Status::Error(core::ErrorCode::InvalidArgument, "invalid HTTP stream options or callbacks");
+    auto parsed = ParseUrl(request.url);
+    if (!parsed.ok()) return parsed.status();
+    auto url = std::move(parsed).value();
+    if (url.scheme == UrlScheme::Https && !impl_->options.tls_context)
+        return core::Status::Error(core::ErrorCode::InvalidArgument, "https stream requires TLS context");
+    try {
+        std::shared_ptr<AsyncHttpOperationBase> operation;
+        if (url.scheme == UrlScheme::Https)
+            operation = std::make_shared<StreamingHttpOperation<TlsPooledConnection>>(
+                impl_, std::move(url), std::move(request), options, std::move(callbacks));
+        else
+            operation = std::make_shared<StreamingHttpOperation<PlainPooledConnection>>(
+                impl_, std::move(url), std::move(request), options, std::move(callbacks));
+        if (auto status = impl_->Register(operation); !status.ok()) return status;
+        operation->Start();
+        return std::static_pointer_cast<IAsyncHttpOperation>(operation);
+    } catch (const std::exception&) {
+        return core::Status::Error(core::ErrorCode::InternalError, "failed to submit HTTP streaming coroutine");
     }
 }
 

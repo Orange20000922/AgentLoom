@@ -446,3 +446,40 @@ TEST(AsyncBeastHttpClientTest, HttpErrorStatusIsSuccessfulTransportResult) {
     ASSERT_TRUE(result.ok()) << result.status().message();
     EXPECT_EQ(result.value().status, 503);
 }
+
+TEST(AsyncBeastHttpClientTest, StreamingAndOrdinaryRequestsShareKeepAliveAndIdleExpiry) {
+    auto server = AsyncMockHttpServer::Start(std::chrono::milliseconds(0), true);
+    AsyncBeastHttpClientOptions options;
+    options.io_thread_count = 2;
+    options.idle_connection_timeout = std::chrono::milliseconds(50);
+    auto created = AsyncBeastHttpClient::Create(options);
+    ASSERT_TRUE(created.ok());
+    auto client = std::move(created).value();
+    HttpClientRequest request;
+    request.url = Url(server->port());
+    request.body = "stream-body";
+    std::string received;
+    std::promise<core::Status> stream_completion;
+    auto stream_future = stream_completion.get_future();
+    auto submitted = client->ExecuteStreamingAsync(request, {}, {
+        .on_headers = [](const auto& headers) { EXPECT_EQ(headers.status, 200); return core::Status::Ok(); },
+        .on_body = [&](auto bytes) { received.append(bytes); return core::Status::Ok(); },
+        .on_complete = [&](auto status) { stream_completion.set_value(status); },
+    });
+    ASSERT_TRUE(submitted.ok());
+    ASSERT_EQ(stream_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_TRUE(stream_future.get().ok());
+    EXPECT_EQ(received, "stream-body");
+    auto ordinary = [&] {
+        std::promise<core::Result<HttpClientResponse>> completed;
+        auto future = completed.get_future();
+        auto operation = client->ExecuteAsync(request, [&](auto result) { completed.set_value(std::move(result)); });
+        EXPECT_TRUE(operation.ok());
+        if (operation.ok()) EXPECT_TRUE(future.get().ok());
+    };
+    ordinary();
+    EXPECT_EQ(server->accepted_connections(), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ordinary();
+    EXPECT_EQ(server->accepted_connections(), 2);
+}

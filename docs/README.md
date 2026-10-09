@@ -20,7 +20,7 @@
 | 领域 | 入口 | 内容 |
 |---|---|---|
 | Architecture | [architecture/README.md](architecture/README.md) | 当前进程边界、协议、Session、Skill 和资源治理设计 |
-| Gateway | [gateway/README.md](gateway/README.md) | HTTP/WebSocket 协议、前端对齐和 Session affinity |
+| Gateway | [gateway/README.md](gateway/README.md) | HTTP/SSE/WebSocket 协议、前端对齐和 Session affinity |
 | Runtime | [runtime/README.md](runtime/README.md) | 配置、部署、扩展、模型、网络和运行时依赖 |
 | Data | [data/README.md](data/README.md) | Memory、缓存、Redis 和数据所有权边界 |
 | Security | [security/README.md](security/README.md) | 认证、Secret、输入、日志和协议安全 |
@@ -42,6 +42,7 @@
 8. [扩展 AgentLoom](runtime/EXTENDING_AGENTLOOM.md)：下游库依赖、Server 边界和领域 provider 注入。
 9. [开发与性能验证环境](development/README.md)：可移植 Windows/v145/CUDA 基线和验证顺序。
 10. [Agent Runtime E2E 性能报告](performance/AGENT_RUNTIME_E2E_PERFORMANCE_REPORT_2026_08.md)：当前容量基线、历史数据审计与优化优先级。
+11. [Chat Completions / Gateway HTTP SSE](architecture/LLM_HTTP_SSE_PROTOCOL.md)：流式事件、提交边界、心跳与重连。
 
 ## 当前规范与设计
 

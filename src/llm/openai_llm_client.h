@@ -24,6 +24,7 @@ struct OpenAiLlmClientOptions {
     CompletionResponseValidationOptions response_validation;
     // 默认 ChatCompletionsProtocol；同步/异步可以共享同一不可变协议或分别注入。
     std::shared_ptr<const ILlmProtocol> protocol;
+    LlmStreamLimits stream_limits;
 };
 
 /// OpenAI-compatible LLM client.
@@ -58,7 +59,7 @@ private:
 };
 
 /// OpenAI-compatible 真异步客户端；HTTP 等待和 retry backoff 均不占用业务线程池 worker。
-class OpenAiAsyncLlmClient final : public IAsyncLlmClient {
+class OpenAiAsyncLlmClient final : public IAsyncLlmClient, public IAsyncStreamingLlmClient {
 public:
     struct Impl;
 
@@ -70,12 +71,16 @@ public:
     core::Result<std::shared_ptr<IAsyncLlmOperation>> CompleteAsync(
         ChatCompletionRequest request,
         Callback callback) override;
+    core::Result<std::shared_ptr<IAsyncLlmOperation>> CompleteStreamingAsync(
+        ChatCompletionRequest request, LlmEventSink sink, Callback callback) override;
 
     /// 幂等关闭：取消在途 completion，等待 retry runtime 收口。
     void Shutdown() noexcept;
 
 private:
     explicit OpenAiAsyncLlmClient(std::shared_ptr<Impl> impl);
+    core::Result<std::shared_ptr<IAsyncLlmOperation>> SubmitCompletion(
+        ChatCompletionRequest request, LlmEventSink sink, Callback callback);
     std::shared_ptr<Impl> impl_;
 };
 
