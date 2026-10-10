@@ -889,6 +889,59 @@ TEST(PersonaRuntimeTest, AsyncTurnIgnoresDuplicateMemoryCompletion) {
     compute.Shutdown(true);
 }
 
+TEST(PersonaRuntimeTest, ShutdownWaitsForCallbackAfterSchedulerLaneRelease) {
+    core::ThreadPool compute({1, 16, "callback-drain-compute"});
+    core::ThreadPool io({1, 16, "callback-drain-io"});
+    core::ThreadPool lane({1, 16, "callback-drain-turn",
+                          std::make_shared<GatewaySessionAffinityScheduler>()});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    ASSERT_TRUE(lane.Start().ok());
+    SessionManager sessions(compute, io, {}, core::LoggerAdapter::ForModule("service"), &lane);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto cache = std::make_shared<FakeSemanticCache>();
+    cache->lookup_hit = false;
+    auto provider = std::make_shared<ManualAsyncLlmClient>();
+    PersonaRuntime runtime(sessions, std::make_shared<SemanticMemoryContextProvider>(cache),
+        std::make_shared<NeutralEmotionAnalyzer>(), std::make_shared<FakeLlmClient>(),
+        PersonaRuntimeOptions{.default_model = "test-model"}, nullptr, nullptr, nullptr,
+        core::LoggerAdapter::ForModule("service"), nullptr, provider, &io);
+    std::promise<void> entered, release, shutdown_entered;
+    auto release_future = release.get_future().share();
+    auto entered_future = entered.get_future();
+    auto captured = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = captured;
+    ChatRequest request;
+    request.session_id = "session-runtime";
+    request.user_input = "blocked final callback";
+    ASSERT_TRUE(runtime.SubmitChat(request, [&, captured](auto response) {
+        EXPECT_TRUE(response.ok());
+        entered.set_value();
+        release_future.wait();
+    }).ok());
+    captured.reset();
+    ASSERT_TRUE(provider->WaitForCount(1, std::chrono::seconds(2)));
+    auto finishing = std::async(std::launch::async, [&] { provider->Complete(0, "answer"); });
+    EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(lane.Stats().scheduler.running_tasks, 0u);
+    auto shutdown = std::async(std::launch::async, [&] {
+        shutdown_entered.set_value();
+        runtime.Shutdown();
+    });
+    shutdown_entered.get_future().wait();
+    EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_FALSE(weak.expired());
+    release.set_value();
+    finishing.get();
+    shutdown.get();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(runtime.SubmitChat(request, [](auto) {}).code(), core::ErrorCode::Cancelled);
+    sessions.Shutdown();
+    lane.Shutdown(true);
+    io.Shutdown(true);
+    compute.Shutdown(true);
+}
+
 TEST(PersonaRuntimeTest, ShutdownCancelsInflightAsyncLlmAndReleasesTurnLane) {
     core::ThreadPool compute({1, 16, "runtime-shutdown-compute"});
     core::ThreadPool io({1, 16, "runtime-shutdown-io"});

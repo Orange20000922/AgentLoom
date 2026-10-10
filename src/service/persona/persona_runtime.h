@@ -1,5 +1,7 @@
 #pragma once
 
+#include "callback_lifetime.h"
+
 #include "isemantic_cache.h"
 #include "long_term_memory_compressor.h"
 #include "llm_client.h"
@@ -318,7 +320,8 @@ public:
     bool SupportsStreaming() const noexcept {
         return dynamic_cast<llm::IAsyncStreamingLlmClient*>(async_llm_client_.get()) != nullptr;
     }
-    /// 停止异步 admission，等待 memory continuation，并取消在途 LLM 后收口 Session commit。
+    /// 外部停服线程关闭 admission、取消在途 LLM，等待最终 callback 及其捕获对象释放。
+    /// 不得在本 runtime 的 callback 内同步调用；调度 lane/quota 仍按原时机释放。
     void Shutdown() noexcept;
 
 private:
@@ -469,6 +472,8 @@ private:
     std::size_t async_turn_operation_count_ = 0;
     std::uint64_t next_async_operation_id_ = 1;
     bool async_stopping_ = false;
+    core::CallbackLifetime callback_lifetime_;
+    std::mutex shutdown_mutex_;
 };
 
 } // namespace agent::service::persona

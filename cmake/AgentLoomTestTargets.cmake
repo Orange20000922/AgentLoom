@@ -88,6 +88,7 @@ if(BERT_BUILD_TESTS)
     set_tests_properties(llama_abi_guard_debug_mismatch PROPERTIES WILL_FAIL TRUE)
 
     add_executable(core_tests
+        tests/core/callback_lifetime_test.cpp
         tests/core/core_infra_test.cpp
         tests/core/keyed_serial_executor_test.cpp
         tests/core/optimizer_test.cpp

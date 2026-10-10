@@ -1,6 +1,7 @@
 # ==================== 公共库 ====================
 
 add_library(agent_core STATIC
+    src/core/callback_lifetime.h
     src/core/blocking_queue.h
     src/core/exception.h
     src/core/keyed_serial_executor.cpp

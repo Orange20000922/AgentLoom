@@ -217,6 +217,17 @@ protected:
     ::net::SseStreamOptions stream_options_;
 };
 
+TEST_F(GatewayStreamingTest, StopWithActiveProviderDrainsBeforeServerDestruction) {
+    auto reader = Read("stop-active");
+    ASSERT_TRUE(provider_.Wait(1));
+    ASSERT_TRUE(reader->Wait("TextDelta"));
+    server_->Stop();
+    server_.reset();
+    EXPECT_TRUE(provider_.WaitDisconnected());
+    EXPECT_EQ(reader->done.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(memory_->admissions.load(), 0);
+}
+
 TEST_F(GatewayStreamingTest, VisibleDeltaPrecedesSingleCommitAndSameSessionRemainsOrdered) {
     auto first = Read("stream-first");
     ASSERT_TRUE(provider_.Wait(1));

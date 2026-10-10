@@ -74,7 +74,8 @@ public:
     core::Result<std::shared_ptr<IAsyncLlmOperation>> CompleteStreamingAsync(
         ChatCompletionRequest request, LlmEventSink sink, Callback callback) override;
 
-    /// 幂等关闭：取消在途 completion，等待 retry runtime 收口。
+    /// 幂等关闭：取消在途 completion，等待 callback 返回及捕获释放，再收口 retry runtime。
+    /// 只能从 callback 外部的关闭线程调用；普通 Cancel 不执行系统生命周期等待。
     void Shutdown() noexcept;
 
 private:

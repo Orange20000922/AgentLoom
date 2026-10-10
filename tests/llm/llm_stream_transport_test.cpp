@@ -92,6 +92,39 @@ struct Clients {
     std::unique_ptr<llm::OpenAiAsyncLlmClient> llm;
 };
 
+TEST(LlmStreamTransportTest, ShutdownWaitsForCallbackReturnAndCapturedResources) {
+    RawServer server({{kHeaders + WireChunk(Delta("answer", "stop")) +
+                       WireChunk("data: [DONE]\n\n") + "0\r\n\r\n"}});
+    Clients clients(server.Url());
+    std::promise<void> entered, release, shutdown_entered;
+    auto entered_future = entered.get_future();
+    auto release_future = release.get_future().share();
+    auto captured = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = captured;
+    auto submitted = clients.llm->CompleteStreamingAsync({}, [](const auto&) {
+        return core::Status::Ok();
+    }, [&, captured](auto response) {
+        EXPECT_TRUE(response.ok()) << response.status().message();
+        entered.set_value();
+        release_future.wait();
+    });
+    ASSERT_TRUE(submitted.ok());
+    captured.reset();
+    EXPECT_EQ(entered_future.wait_for(2s), std::future_status::ready);
+    auto shutdown = std::async(std::launch::async, [&] {
+        shutdown_entered.set_value();
+        clients.llm->Shutdown();
+    });
+    shutdown_entered.get_future().wait();
+    EXPECT_EQ(shutdown.wait_for(20ms), std::future_status::timeout);
+    EXPECT_FALSE(weak.expired());
+    release.set_value();
+    shutdown.get();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(clients.llm->CompleteAsync({}, [](auto) {}).status().code(),
+              core::ErrorCode::Cancelled);
+}
+
 TEST(LlmStreamTransportTest, EmitsFirstDeltaBeforeProviderEndAcrossRealHttpChunks) {
     const auto body = Delta("中文🙂");
     std::vector<WirePart> parts{{kHeaders}};
