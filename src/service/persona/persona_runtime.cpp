@@ -702,6 +702,12 @@ core::Status PersonaRuntime::SubmitChat(ChatRequest request, ChatCallback callba
     }
 
     const auto trace_id = request.trace_id;
+    auto tracked = callback_lifetime_.Track<core::Result<ChatResponse>>(std::move(callback));
+    if (!tracked.ok()) {
+        logger_.warn("[persona_runtime] callback admission rejected: {}", tracked.status().message());
+        return tracked.status();
+    }
+    callback = std::move(tracked).value();
     const auto submitted_at = std::chrono::steady_clock::now();
     auto response_holder = std::make_shared<std::optional<ChatResponse>>();
     DispatchOptions dispatch;
@@ -1587,13 +1593,11 @@ void PersonaRuntime::FinishAsyncTurnOperation(const AsyncTurnOperation& operatio
 }
 
 void PersonaRuntime::Shutdown() noexcept {
+    std::lock_guard shutdown_lock(shutdown_mutex_);
+    callback_lifetime_.CloseAdmission();
     std::vector<std::shared_ptr<llm::IAsyncLlmOperation>> operations;
     {
         std::lock_guard lock(async_operations_mutex_);
-        if (async_stopping_ && async_operations_.empty() &&
-            async_turn_operation_count_ == 0) {
-            return;
-        }
         async_stopping_ = true;
         operations.reserve(async_operations_.size());
         for (const auto& [_, record] : async_operations_) {
@@ -1609,6 +1613,9 @@ void PersonaRuntime::Shutdown() noexcept {
     async_operations_drained_.wait(lock, [this] {
         return async_operations_.empty() && async_turn_operation_count_ == 0;
     });
+    lock.unlock();
+    // 不把 callback 生命周期和 scheduler quota 绑定；callback 内只有原子租约归还。
+    callback_lifetime_.Wait();
 }
 
 core::Result<PersonaRuntime::CompletedChat> PersonaRuntime::FinalizeLlmCompletion(

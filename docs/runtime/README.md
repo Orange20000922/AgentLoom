@@ -8,6 +8,7 @@
 - [部署指南](DEPLOYMENT.md)
 - [扩展 AgentLoom](EXTENDING_AGENTLOOM.md)
 - [Net API Notes](NET_API_NOTES.md)
+- [Callback 生命周期与优雅停服](CALLBACK_LIFETIME_SHUTDOWN.md)
 - [Async gRPC Runtime](async_grpc_runtime.md)
 - [GStreamer Windows Setup](../development/GSTREAMER_WINDOWS_SETUP.md)
 

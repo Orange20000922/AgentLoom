@@ -1,5 +1,6 @@
 #include "openai_llm_client.h"
 #include "logger_adapter.h"
+#include "callback_lifetime.h"
 
 #include <boost/asio.hpp>
 #include <atomic>
@@ -214,6 +215,8 @@ struct OpenAiAsyncLlmClient::Impl final
     WorkGuard retry_guard;
     core::LoggerAdapter logger;
     std::thread retry_thread;
+    core::CallbackLifetime callbacks;
+    std::mutex shutdown_mutex;
     std::mutex mutex;
     bool stopping = false;
     std::unordered_map<AsyncOpenAiOperation*, std::shared_ptr<AsyncOpenAiOperation>> operations;
@@ -452,12 +455,12 @@ private:
 } // namespace
 
 void OpenAiAsyncLlmClient::Impl::Shutdown() noexcept {
+    // 外部关闭线程串行执行 drain；业务 callback 不得在自身内部同步 Shutdown。
+    std::lock_guard shutdown_lock(shutdown_mutex);
+    callbacks.CloseAdmission();
     std::vector<std::shared_ptr<AsyncOpenAiOperation>> pending;
     {
         std::lock_guard lock(mutex);
-        if (stopping) {
-            return;
-        }
         stopping = true;
         pending.reserve(operations.size());
         for (const auto& [_, operation] : operations) {
@@ -468,6 +471,7 @@ void OpenAiAsyncLlmClient::Impl::Shutdown() noexcept {
         operation->Cancel();
     }
     pending.clear();
+    callbacks.Wait();
     retry_guard.reset();
     if (retry_thread.joinable()) {
         if (retry_thread.get_id() == std::this_thread::get_id()) {
@@ -538,6 +542,9 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::SubmitCo
                                    "async LLM callback is required");
     }
     try {
+        auto tracked = impl_->callbacks.Track<core::Result<ChatCompletionResponse>>(std::move(callback));
+        if (!tracked.ok()) return tracked.status();
+        callback = std::move(tracked).value();
         if (auto status = impl_->options.protocol->ValidateRequest(request); !status.ok()) {
             impl_->logger.warn("LLM request rejected: {}", status.message());
             return status;
