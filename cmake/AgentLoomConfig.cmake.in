@@ -1,5 +1,8 @@
 @PACKAGE_INIT@
 
+# PACKAGE_PREFIX_DIR 会被下方 find_dependency 加载的嵌套包配置覆写，必须先快照。
+set(AgentLoom_PACKAGE_PREFIX_DIR "${PACKAGE_PREFIX_DIR}")
+
 include(CMakeFindDependencyMacro)
 
 find_dependency(Protobuf CONFIG)
@@ -22,19 +25,19 @@ find_dependency(libzip CONFIG)
 find_dependency(pugixml CONFIG)
 find_dependency(Threads)
 
-set(AgentLoom_THIRD_PARTY_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/AgentLoom/third_party")
+set(AgentLoom_THIRD_PARTY_INCLUDE_DIR "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/AgentLoom/third_party")
 
 if(NOT TARGET faiss)
     add_library(faiss SHARED IMPORTED)
     if(WIN32)
         set_target_properties(faiss PROPERTIES
-            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/faiss.dll"
-            IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/faiss.lib"
+            IMPORTED_LOCATION "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/faiss.dll"
+            IMPORTED_IMPLIB "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/faiss.lib"
             INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_THIRD_PARTY_INCLUDE_DIR}/faiss")
     else()
         find_library(AgentLoom_OPENBLAS_LIBRARY NAMES openblas libopenblas.so.0 REQUIRED)
         set_target_properties(faiss PROPERTIES
-            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/libfaiss.so"
+            IMPORTED_LOCATION "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/libfaiss.so"
             INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_THIRD_PARTY_INCLUDE_DIR}/faiss"
             INTERFACE_LINK_LIBRARIES "${AgentLoom_OPENBLAS_LIBRARY}")
     endif()
@@ -62,12 +65,12 @@ if(NOT TARGET onnxruntime)
     add_library(onnxruntime SHARED IMPORTED)
     if(WIN32)
         set_target_properties(onnxruntime PROPERTIES
-            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/onnxruntime.dll"
-            IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/onnxruntime.lib"
+            IMPORTED_LOCATION "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/onnxruntime.dll"
+            IMPORTED_IMPLIB "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/onnxruntime.lib"
             INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_ONNXRUNTIME_INCLUDE_DIR}")
     else()
         set_target_properties(onnxruntime PROPERTIES
-            IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/libonnxruntime.so"
+            IMPORTED_LOCATION "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/libonnxruntime.so"
             INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_ONNXRUNTIME_INCLUDE_DIR}")
     endif()
 endif()
@@ -78,13 +81,13 @@ if(WIN32 AND NOT TARGET sqlite3)
         IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/sqlite3.dll"
         INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_SQLITE_INCLUDE_DIR}")
     set_property(TARGET sqlite3 PROPERTY
-        IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/sqlite3.lib")
+        IMPORTED_IMPLIB "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/sqlite3.lib")
 endif()
 
 if(NOT TARGET hf_tokenizers_capi)
     add_library(hf_tokenizers_capi STATIC IMPORTED)
     set_target_properties(hf_tokenizers_capi PROPERTIES
-        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/@HF_TOKENIZERS_STATICLIB_NAME@"
+        IMPORTED_LOCATION "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/@HF_TOKENIZERS_STATICLIB_NAME@"
         INTERFACE_INCLUDE_DIRECTORIES "${AgentLoom_HF_TOKENIZERS_INCLUDE_DIR}")
     if(WIN32)
         set_property(TARGET hf_tokenizers_capi APPEND PROPERTY INTERFACE_LINK_LIBRARIES
@@ -102,7 +105,7 @@ if(@AGENTLOOM_BUILD_LOCAL_LLM@ AND NOT TARGET AgentLoom::llama_cpp_external)
     set(_agentloom_llama_libraries "")
     foreach(_agentloom_llama_library_name IN ITEMS @AGENTLOOM_LLAMA_LIBRARY_NAMES@)
         list(APPEND _agentloom_llama_libraries
-            "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/${_agentloom_llama_library_name}")
+            "${AgentLoom_PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/${_agentloom_llama_library_name}")
     endforeach()
     set_target_properties(AgentLoom::llama_cpp_external PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES

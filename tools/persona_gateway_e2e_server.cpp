@@ -781,6 +781,7 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config) {
         async_primary = std::move(async_holder);
     }
 
+#if defined(AGENTLOOM_HAS_LOCAL_LLM)
     if (config.local_llm_enabled) {
         auto local_llm = std::make_shared<agent::llm::GrpcLocalLlmClient>(config.local_llm);
         agent::llm::LocalLlmChatClientOptions local_options;
@@ -789,6 +790,13 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config) {
             : config.gateway.runtime.default_model;
         fallback = std::make_shared<agent::llm::LocalLlmChatClient>(std::move(local_llm), local_options);
     }
+#else
+    if (config.local_llm_enabled) {
+        return core::Status::Error(
+            core::ErrorCode::FailedPrecondition,
+            "local_llm is enabled but AgentLoom was built without local LLM support");
+    }
+#endif
 
     if (primary && fallback) {
         // 本地 fallback 尚无异步组合接口，保留与生产装配一致的同步故障切换语义。

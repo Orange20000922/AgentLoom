@@ -28,7 +28,7 @@ ONNXRUNTIME_URL="https://github.com/microsoft/onnxruntime/releases/download/v$ON
 
 SQLITE_VERSION="${SQLITE_VERSION:-3530100}"
 SQLITE_ROOT="$DEPS_DIR/sqlite-amalgamation-$SQLITE_VERSION"
-SQLITE_URL="https://www.sqlite.org/2025/sqlite-amalgamation-$SQLITE_VERSION.zip"
+SQLITE_URL="https://www.sqlite.org/2026/sqlite-amalgamation-$SQLITE_VERSION.zip"
 
 BOOST_VERSION="${BOOST_VERSION:-1_85_0}"
 BOOST_ROOT="$DEPS_DIR/boost_$BOOST_VERSION"
