@@ -1,18 +1,186 @@
 #include "skill_prompt_compiler.h"
 
 #include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 
 namespace agent::skill {
+namespace {
+
+using Json = nlohmann::json;
+
+std::string SchemaPath(std::string_view path, std::string_view property) {
+    return std::string(path) + "." + std::string(property);
+}
+
+bool JsonTypeMatches(const Json& value, std::string_view type) {
+    if (type == "object") return value.is_object();
+    if (type == "array") return value.is_array();
+    if (type == "string") return value.is_string();
+    if (type == "number") return value.is_number();
+    if (type == "integer") return value.is_number_integer();
+    if (type == "boolean") return value.is_boolean();
+    if (type == "null") return value.is_null();
+    return false;
+}
+
+core::Status ValidateJsonSchemaValue(
+    const Json& schema,
+    const Json& value,
+    std::string_view path) {
+    if (!schema.is_object()) {
+        return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                   "tool input schema node must be an object");
+    }
+
+    if (const auto type = schema.find("type"); type != schema.end()) {
+        bool type_matches = false;
+        if (type->is_string()) {
+            type_matches = JsonTypeMatches(value, type->get<std::string>());
+        } else if (type->is_array()) {
+            for (const auto& candidate : *type) {
+                if (candidate.is_string() &&
+                    JsonTypeMatches(value, candidate.get<std::string>())) {
+                    type_matches = true;
+                    break;
+                }
+            }
+        } else {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool input schema type must be a string or array");
+        }
+        if (!type_matches) {
+            return core::Status::Error(
+                core::ErrorCode::InvalidArgument,
+                "tool argument type mismatch at " + std::string(path));
+        }
+    }
+
+    if (const auto enumeration = schema.find("enum"); enumeration != schema.end()) {
+        if (!enumeration->is_array()) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool input schema enum must be an array");
+        }
+        bool found = false;
+        for (const auto& candidate : *enumeration) {
+            if (candidate == value) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return core::Status::Error(
+                core::ErrorCode::InvalidArgument,
+                "tool argument is not an allowed enum value at " + std::string(path));
+        }
+    }
+    if (const auto constant = schema.find("const"); constant != schema.end() &&
+        *constant != value) {
+        return core::Status::Error(
+            core::ErrorCode::InvalidArgument,
+            "tool argument does not match const at " + std::string(path));
+    }
+
+    if (value.is_object()) {
+        const auto required = schema.find("required");
+        if (required != schema.end()) {
+            if (!required->is_array()) {
+                return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                           "tool input schema required must be an array");
+            }
+            for (const auto& name : *required) {
+                if (!name.is_string()) {
+                    return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                               "tool input schema required entries must be strings");
+                }
+                const auto key = name.get<std::string>();
+                if (!value.contains(key)) {
+                    return core::Status::Error(
+                        core::ErrorCode::InvalidArgument,
+                        "tool call is missing required argument: " + key);
+                }
+            }
+        }
+
+        const auto properties = schema.find("properties");
+        if (properties != schema.end() && !properties->is_object()) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool input schema properties must be an object");
+        }
+        const auto additional = schema.find("additionalProperties");
+        const bool reject_additional =
+            additional != schema.end() && additional->is_boolean() && !additional->get<bool>();
+        for (const auto& [name, child] : value.items()) {
+            if (properties != schema.end()) {
+                const auto property = properties->find(name);
+                if (property != properties->end()) {
+                    if (auto status = ValidateJsonSchemaValue(
+                            *property, child, SchemaPath(path, name)); !status.ok()) {
+                        return status;
+                    }
+                    continue;
+                }
+            }
+            if (reject_additional) {
+                return core::Status::Error(
+                    core::ErrorCode::InvalidArgument,
+                    "tool call contains unexpected argument: " + name);
+            }
+        }
+    }
+
+    if (value.is_array()) {
+        if (const auto items = schema.find("items"); items != schema.end()) {
+            for (std::size_t index = 0; index < value.size(); ++index) {
+                if (auto status = ValidateJsonSchemaValue(
+                        *items, value[index], SchemaPath(path, std::to_string(index))); !status.ok()) {
+                    return status;
+                }
+            }
+        }
+    }
+
+    if (value.is_string()) {
+        const auto length = value.get<std::string>().size();
+        if (schema.contains("minLength") &&
+            (!schema["minLength"].is_number_unsigned() ||
+             length < schema["minLength"].get<std::size_t>())) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool argument is shorter than minLength at " + std::string(path));
+        }
+        if (schema.contains("maxLength") &&
+            (!schema["maxLength"].is_number_unsigned() ||
+             length > schema["maxLength"].get<std::size_t>())) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool argument exceeds maxLength at " + std::string(path));
+        }
+    }
+
+    if (value.is_number()) {
+        if (schema.contains("minimum") &&
+            (!schema["minimum"].is_number() || value.get<double>() < schema["minimum"].get<double>())) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool argument is below minimum at " + std::string(path));
+        }
+        if (schema.contains("maximum") &&
+            (!schema["maximum"].is_number() || value.get<double>() > schema["maximum"].get<double>())) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "tool argument exceeds maximum at " + std::string(path));
+        }
+    }
+    return core::Status::Ok();
+}
+
+}  // namespace
 
 core::Result<std::vector<SkillCall>> ParseToolCalls(
     const llm::ChatCompletionResponse& response) {
     std::vector<SkillCall> calls;
     for (const auto& tool_call : response.tool_calls) {
-        if (tool_call.name.empty() || tool_call.arguments_json.empty()) {
+        if (tool_call.id.empty() || tool_call.name.empty() || tool_call.arguments_json.empty()) {
             return core::Status::Error(core::ErrorCode::InvalidArgument,
-                                       "tool call is missing name or arguments");
+                                       "tool call is missing id, name or arguments");
         }
         try {
             const auto arguments = nlohmann::json::parse(tool_call.arguments_json);
@@ -63,13 +231,8 @@ core::Result<std::vector<SkillCall>> ParseToolCalls(
         try {
             const auto schema = nlohmann::json::parse(manifest.value().input_schema_json);
             const auto arguments = nlohmann::json::parse(call.arguments_json);
-            if (schema.contains("required") && schema["required"].is_array()) {
-                for (const auto& required : schema["required"]) {
-                    if (required.is_string() && !arguments.contains(required.get<std::string>())) {
-                        return core::Status::Error(core::ErrorCode::InvalidArgument,
-                                                   "tool call is missing required argument");
-                    }
-                }
+            if (auto status = ValidateJsonSchemaValue(schema, arguments, "$"); !status.ok()) {
+                return status;
             }
         } catch (const nlohmann::json::exception& error) {
             return core::Status::Error(core::ErrorCode::InvalidArgument,

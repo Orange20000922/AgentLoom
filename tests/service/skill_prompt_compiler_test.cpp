@@ -48,6 +48,43 @@ TEST(SkillCallParserTest, RejectsMissingRequiredArgument) {
               core::ErrorCode::InvalidArgument);
 }
 
+TEST(SkillCallParserTest, RejectsArgumentTypeAndUnexpectedField) {
+    auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
+    auto manifest = agent::skill::SkillManifest{};
+    manifest.skill_id = "graph.constraint";
+    manifest.version = "1.0.0";
+    manifest.input_schema_json =
+        R"({"type":"object","properties":{"reason":{"type":"string"}},)"
+        R"("required":["reason"],"additionalProperties":false})";
+    manifest.executor.reference = manifest.skill_id;
+    ASSERT_TRUE(registry->Register(manifest).ok());
+
+    agent::llm::ChatCompletionResponse wrong_type;
+    wrong_type.tool_calls.push_back(
+        {"call-type", manifest.skill_id, R"({"reason":42})"});
+    EXPECT_EQ(agent::skill::ParseToolCalls(wrong_type, *registry).status().code(),
+              core::ErrorCode::InvalidArgument);
+
+    agent::llm::ChatCompletionResponse unexpected_field;
+    unexpected_field.tool_calls.push_back(
+        {"call-extra", manifest.skill_id, R"({"reason":"look","extra":true})"});
+    EXPECT_EQ(agent::skill::ParseToolCalls(unexpected_field, *registry).status().code(),
+              core::ErrorCode::InvalidArgument);
+}
+
+TEST(SkillCallParserTest, RejectsMissingToolCallId) {
+    auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
+    auto manifest = agent::skill::SkillManifest{};
+    manifest.skill_id = "vision.observe";
+    manifest.version = "1.0.0";
+    manifest.executor.reference = manifest.skill_id;
+    ASSERT_TRUE(registry->Register(manifest).ok());
+    agent::llm::ChatCompletionResponse response;
+    response.tool_calls.push_back({"", manifest.skill_id, "{}"});
+    EXPECT_EQ(agent::skill::ParseToolCalls(response, *registry).status().code(),
+              core::ErrorCode::InvalidArgument);
+}
+
 TEST(SkillPromptCompilerTest, BuildsToolResultMessageForFollowUpTurn) {
     agent::skill::SkillResult result;
     result.call_id = "call-1";
