@@ -91,6 +91,8 @@ struct SkillToolCallContext {
     std::string persona_id;
     std::string trace_id;
     std::chrono::milliseconds timeout{30000};
+    // 非空时限制本轮只能执行已注入并授权的 function name。
+    std::vector<std::string> allowed_tool_names;
 };
 
 class ISkillToolCallCoordinator {

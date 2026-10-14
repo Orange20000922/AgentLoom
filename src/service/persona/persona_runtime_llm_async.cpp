@@ -190,7 +190,13 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                         session.user_uuid,
                         session.persona_id,
                         prepared_value.request.trace_id,
-                        std::chrono::seconds(30)};
+                        std::chrono::seconds(30),
+                        [&prepared_value] {
+                            std::vector<std::string> names;
+                            names.reserve(prepared_value.tools.size());
+                            for (const auto& tool : prepared_value.tools) names.push_back(tool.name);
+                            return names;
+                        }()};
                     auto completion_holder =
                         std::make_shared<std::function<void(core::Result<CompletedChat>)>>(
                             std::move(completion));

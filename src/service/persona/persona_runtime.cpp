@@ -1166,7 +1166,13 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
                     session.user_uuid,
                     session.persona_id,
                     prepared.request.trace_id,
-                    std::chrono::seconds(30)});
+                    std::chrono::seconds(30),
+                    [&prepared] {
+                        std::vector<std::string> names;
+                        names.reserve(prepared.tools.size());
+                        for (const auto& tool : prepared.tools) names.push_back(tool.name);
+                        return names;
+                    }()});
             if (!tool_messages.ok()) return tool_messages.status();
             prepared.messages.insert(prepared.messages.end(),
                                      std::make_move_iterator(tool_messages.value().begin()),

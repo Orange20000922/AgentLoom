@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <atomic>
+#include <algorithm>
 
 namespace agent::skill {
 
@@ -136,6 +137,12 @@ SkillToolCallCoordinator::SkillToolCallCoordinator(
     std::shared_ptr<ISkillInvocationService> invocation)
     : registry_(std::move(registry)), invocation_(std::move(invocation)) {}
 
+namespace {
+bool IsAllowedTool(std::string_view tool_name, const std::vector<std::string>& allowed) {
+    return allowed.empty() || std::find(allowed.begin(), allowed.end(), tool_name) != allowed.end();
+}
+}
+
 core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
     const llm::ChatCompletionResponse& response,
     const SkillToolCallContext& context) {
@@ -148,6 +155,16 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
     std::vector<llm::ChatMessage> messages;
     messages.reserve(calls.value().size());
     for (const auto& call : calls.value()) {
+        if (!IsAllowedTool(call.tool_name, context.allowed_tool_names)) {
+            SkillResult rejected;
+            rejected.call_id = call.call_id;
+            rejected.skill_id = call.skill_id;
+            rejected.status = core::Status::Error(
+                core::ErrorCode::PermissionDenied,
+                "tool call is not allowed for this turn");
+            messages.push_back(MakeToolResultMessage(rejected));
+            continue;
+        }
         struct CompletionState {
             std::mutex mutex;
             std::condition_variable condition;
@@ -242,6 +259,17 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
             return;
         }
         const auto call = state->calls[state->next++];
+        if (!IsAllowedTool(call.tool_name, state->context.allowed_tool_names)) {
+            SkillResult rejected;
+            rejected.call_id = call.call_id;
+            rejected.skill_id = call.skill_id;
+            rejected.status = core::Status::Error(
+                core::ErrorCode::PermissionDenied,
+                "tool call is not allowed for this turn");
+            state->messages.push_back(MakeToolResultMessage(rejected));
+            (*self)();
+            return;
+        }
         SkillExecutionRequest request;
         request.call = call;
         request.session_id = state->context.session_id;

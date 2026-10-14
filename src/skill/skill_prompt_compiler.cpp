@@ -204,6 +204,24 @@ llm::ChatMessage MakeToolResultMessage(const SkillResult& result) {
     message.tool_call_id = result.call_id;
     if (result.status.ok()) {
         message.content = result.result_json.empty() ? "{}" : result.result_json;
+        if (!result.provenance_json.empty()) {
+            try {
+                auto payload = nlohmann::json::parse(message.content);
+                const auto provenance = nlohmann::json::parse(result.provenance_json);
+                if (payload.is_object()) {
+                    payload["provenance"] = provenance;
+                } else {
+                    payload = nlohmann::json{
+                        {"result", std::move(payload)},
+                        {"provenance", provenance},
+                    };
+                }
+                message.content = payload.dump();
+            } catch (const nlohmann::json::exception&) {
+                // 工具结果本身仍需原样回填；业务 executor 可在上层把格式错误转换为失败结果。
+                message.content = result.result_json;
+            }
+        }
     } else {
         nlohmann::json error = {
             {"error", {

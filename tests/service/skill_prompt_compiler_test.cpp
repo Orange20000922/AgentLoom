@@ -1,5 +1,6 @@
 #include "../../src/skill/skill_prompt_compiler.h"
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 TEST(SkillPromptCompilerTest, EmitsStaticProtocolAndManifest) {
     auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
@@ -94,4 +95,17 @@ TEST(SkillPromptCompilerTest, BuildsToolResultMessageForFollowUpTurn) {
     EXPECT_EQ(message.role, agent::llm::ChatRole::Tool);
     EXPECT_EQ(message.tool_call_id, "call-1");
     EXPECT_EQ(message.content, R"({"observed":true})");
+}
+
+TEST(SkillPromptCompilerTest, AddsProvenanceWithoutChangingResultFields) {
+    agent::skill::SkillResult result;
+    result.call_id = "call-provenance";
+    result.skill_id = "graph.constraint";
+    result.result_json = R"({"constraints_text":"approved"})";
+    result.provenance_json = R"({"kb_version":"kb-42","evidence_state":"POSITIVE"})";
+    const auto message = agent::skill::MakeToolResultMessage(result);
+    const auto body = nlohmann::json::parse(message.content);
+    EXPECT_EQ(body["constraints_text"], "approved");
+    EXPECT_EQ(body["provenance"]["kb_version"], "kb-42");
+    EXPECT_EQ(body["provenance"]["evidence_state"], "POSITIVE");
 }
