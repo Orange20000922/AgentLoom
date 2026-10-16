@@ -9,6 +9,7 @@
 #include <AgentLoom/llm/llm_client.h>
 #include <AgentLoom/llm/llm_protocol.h>
 #include <AgentLoom/llm/openai_llm_client.h>
+#include <AgentLoom/skill/skill_executor.h>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -22,6 +23,18 @@
 #include <vector>
 
 namespace {
+
+// 安装包消费者可独立实现企业授权/来源规则，接口不要求访问 Runtime 内部状态。
+class ConsumerSkillPolicy final : public agent::skill::ISkillToolPolicy {
+public:
+    core::Status Authorize(const agent::skill::SkillToolCallContext&,
+        const agent::skill::SkillCall&, const agent::skill::SkillManifest&) const override {
+        return core::Status::Ok();
+    }
+    core::Status ValidateResult(const agent::skill::SkillToolCallContext&,
+        const agent::skill::SkillCall&, const agent::skill::SkillManifest&,
+        const agent::skill::SkillResult&) const override { return core::Status::Ok(); }
+};
 
 struct ConsumerRouteContext {};
 
@@ -101,6 +114,19 @@ int main() {
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"SDK stream\"},\"finish_reason\":\"stop\"}]}\n\n"
         "data: [DONE]\n\n");
     if (!stream_status.ok() || !stream_decoder.value()->Finish().ok()) return 12;
+
+    agent::skill::SkillToolCallContext skill_context;
+    skill_context.allowed_tool_names = std::vector<std::string>{};
+    skill_context.policy = std::make_shared<ConsumerSkillPolicy>();
+    agent::skill::SkillResult skill_result;
+    skill_result.call_id = "sdk-call";
+    skill_result.result_json = R"({"value":1})";
+    skill_result.provenance_json = R"({"version":"sdk-v1"})";
+    const auto skill_message = agent::skill::MakeToolResultMessage(
+        skill_result, agent::skill::ToolResultFormat::EnvelopeV1);
+    if (skill_message.content.find("agentloom.tool-result.v1") == std::string::npos ||
+        skill_message.content.find("sdk-v1") == std::string::npos ||
+        !agent::skill::ValidateSkillJsonSchema(R"({"type":"integer"})", "1").ok()) return 13;
 
     core::BucketMemoryPool pool;
     auto block = pool.allocate(256);

@@ -83,6 +83,8 @@ struct ChatGatewayRequest {
     std::string model;
     bool stream = false;
     llm::LlmEventSink event_sink;
+    // 仅由可信主动事件入口填写；追加字段以保留旧聚合初始化顺序。
+    std::optional<std::string> proactive_trigger;
 };
 
 struct ChatGatewayResponse : GatewayEnvelopeBase {

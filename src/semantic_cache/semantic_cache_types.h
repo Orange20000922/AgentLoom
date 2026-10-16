@@ -42,6 +42,8 @@ struct CacheLookupRequest {
     std::string persona_id;
 
     std::vector<std::string> recent_turns;
+    // 与 recent_turns 按位置对应；缺失时兼容旧调用方并回退到文本匹配。
+    std::vector<std::string> recent_turn_ids;
     bool has_image_reference = false;
 
     std::unordered_map<std::string, std::string> extra;

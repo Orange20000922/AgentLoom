@@ -341,6 +341,8 @@ void PersonaGatewayConfigSection::LoadJson(const Json& root, MultimodalServerOpt
     SetSize(*section, Name(), "session_max_recent_turns", options.persona_gateway.session_max_recent_turns, 1);
     SetSize(*section, Name(), "session_max_active_sessions", options.persona_gateway.session_max_active_sessions, 1);
     SetSize(*section, Name(), "runtime_recent_raw_turns", options.persona_gateway.runtime_recent_raw_turns, 1);
+    SetSize(*section, Name(), "runtime_max_prompt_characters",
+            options.persona_gateway.runtime_max_prompt_characters, 1);
     SetString(*section, Name(), "runtime_default_model", options.persona_gateway.runtime_default_model);
     if (const Json* streaming = FindField(*section, Name(), "streaming")) {
         if (!streaming->is_object()) throw std::runtime_error("persona_gateway.streaming must be an object");

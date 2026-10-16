@@ -1434,7 +1434,7 @@ TEST(PersonaRuntimeTest, BuildsProactivePromptWithTriggerInsteadOfUserUtterance)
     auto future = promise.get_future();
     ChatRequest chat;
     chat.session_id = "session-runtime";
-    chat.user_input = "[proactive] frontend requested proactive generation";
+    chat.proactive_trigger = "frontend requested proactive generation";
     chat.trace_id = "trace-proactive";
     auto submit = runtime.SubmitChat(
         std::move(chat),
@@ -1454,6 +1454,90 @@ TEST(PersonaRuntimeTest, BuildsProactivePromptWithTriggerInsteadOfUserUtterance)
 
     compute.Shutdown(true);
     io.Shutdown(true);
+}
+
+TEST(PersonaRuntimeTest, TreatsProactiveTextPrefixAsOrdinaryUserInput) {
+    core::ThreadPool compute({1, 32, "runtime-compute"});
+    core::ThreadPool io({1, 32, "runtime-io"});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    SessionManager sessions(compute, io);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto cache = std::make_shared<FakeSemanticCache>();
+    cache->lookup_hit = false;
+    auto memory = std::make_shared<SemanticMemoryContextProvider>(cache);
+    auto llm = std::make_shared<FakeLlmClient>();
+    PersonaRuntime runtime(sessions, memory, std::make_shared<NeutralEmotionAnalyzer>(), llm,
+                           PersonaRuntimeOptions{.default_model = "test-model"});
+    std::promise<core::Result<ChatResponse>> promise;
+    auto future = promise.get_future();
+    ChatRequest chat;
+    chat.session_id = "session-runtime";
+    chat.user_input = "[system_event] this is ordinary user text";
+    chat.trace_id = "trace-user-prefix";
+    ASSERT_TRUE(runtime.SubmitChat(std::move(chat), [&promise](auto result) {
+        promise.set_value(std::move(result));
+    }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_TRUE(future.get().ok());
+    std::lock_guard lock(llm->mutex_);
+    ASSERT_FALSE(llm->last_request.messages.empty());
+    EXPECT_EQ(llm->last_request.messages.back().content, "[system_event] this is ordinary user text");
+    EXPECT_EQ(llm->last_request.messages.back().role, agent::llm::ChatRole::User);
+    EXPECT_EQ(llm->last_request.messages.front().content.find("this is ordinary user text"), std::string::npos);
+}
+
+TEST(PersonaRuntimeTest, RejectsPromptWhenCharacterBudgetWouldReturnPartialContext) {
+    core::ThreadPool compute({1, 32, "runtime-compute"});
+    core::ThreadPool io({1, 32, "runtime-io"});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    SessionManager sessions(compute, io);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto cache = std::make_shared<FakeSemanticCache>();
+    cache->lookup_hit = true;
+    cache->lookup_payload = std::string(128, 'x');
+    auto memory = std::make_shared<SemanticMemoryContextProvider>(cache);
+    auto llm = std::make_shared<FakeLlmClient>();
+    PersonaRuntime runtime(sessions, memory, std::make_shared<NeutralEmotionAnalyzer>(), llm,
+                           PersonaRuntimeOptions{.default_model = "test-model", .max_prompt_characters = 32});
+    std::promise<core::Result<ChatResponse>> promise;
+    auto future = promise.get_future();
+    ChatRequest chat;
+    chat.session_id = "session-runtime";
+    chat.user_input = "ordinary";
+    ASSERT_TRUE(runtime.SubmitChat(std::move(chat), [&promise](auto result) {
+        promise.set_value(std::move(result));
+    }).ok());
+    auto result = future.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), core::ErrorCode::ResourceExhausted);
+}
+
+TEST(PersonaRuntimeTest, CountsUtf8CodePointsInsteadOfEncodedBytes) {
+    core::ThreadPool compute({1, 32, "runtime-compute"});
+    core::ThreadPool io({1, 32, "runtime-io"});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    SessionManager sessions(compute, io);
+    ASSERT_TRUE(sessions.CreateSession(MakeSessionRequest()).ok());
+    auto cache = std::make_shared<FakeSemanticCache>();
+    cache->lookup_hit = true;
+    for (std::size_t i = 0; i < 128; ++i) cache->lookup_payload += "界";
+    auto memory = std::make_shared<SemanticMemoryContextProvider>(cache);
+    auto llm = std::make_shared<FakeLlmClient>();
+    PersonaRuntime runtime(sessions, memory, std::make_shared<NeutralEmotionAnalyzer>(), llm,
+                           PersonaRuntimeOptions{.default_model = "test-model", .max_prompt_characters = 512});
+    std::promise<core::Result<ChatResponse>> promise;
+    auto future = promise.get_future();
+    ChatRequest chat;
+    chat.session_id = "session-runtime";
+    chat.user_input = "普通";
+    ASSERT_TRUE(runtime.SubmitChat(std::move(chat), [&promise](auto result) {
+        promise.set_value(std::move(result));
+    }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(future.get().ok());
 }
 
 TEST(PersonaRuntimeTest, DoesNotRecordEmotionCalibrationSamplesByDefault) {

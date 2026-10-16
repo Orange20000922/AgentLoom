@@ -64,6 +64,7 @@ public:
         skill::SkillResult result;
         result.call_id = request.call.call_id;
         result.result_json = R"({"fact":"verified"})";
+        result.provenance_json = R"({"source_id":"published-card","version":"kb-test-1"})";
         callbacks.on_result(std::move(result));
         return persona::SkillSessionSnapshot{};
     }
@@ -89,7 +90,9 @@ public:
         requests_.push_back(request);
         llm::ChatCompletionResponse response;
         response.model = "gateway-tool-test";
-        if (requests_.size() == 1) {
+        if (requests_.size() == 1 || repeat_tool_calls) {
+            response.content = "tool planning text";
+            response.reasoning_content = "tool planning reasoning";
             response.tool_calls.push_back({kCall, "test_lookup", "{}"});
         } else {
             response.content = "grounded final reply";
@@ -121,7 +124,8 @@ public:
             return decoder->Feed("data: " + Json{{"id", "tool-generation"}, {"model", "gateway-tool-test"},
                 {"choices", Json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish}}})}}.dump() + "\n\n");
         };
-        auto status = feed({{"content", response.value().tool_calls.empty() ? response.value().content : "planning should be hidden"}});
+        auto status = feed({{"content", response.value().content},
+                            {"reasoning_content", response.value().reasoning_content.value_or("")}});
         if (status.ok() && !response.value().tool_calls.empty()) {
             const auto& call = response.value().tool_calls.front();
             status = feed({{"tool_calls", Json::array({{{"index", 0}, {"id", call.id}, {"type", "function"},
@@ -132,6 +136,7 @@ public:
         return std::shared_ptr<llm::IAsyncLlmOperation>(std::make_shared<CompletedLlmOperation>());
     }
     std::atomic<int> async_calls{0};
+    bool repeat_tool_calls = false;
 private:
     mutable std::mutex mutex_;
     std::vector<llm::ChatCompletionRequest> requests_;
@@ -203,9 +208,12 @@ struct Harness {
         ASSERT_EQ(assistant.role, llm::ChatRole::Assistant);
         ASSERT_EQ(assistant.tool_calls.size(), 1u);
         EXPECT_EQ(assistant.tool_calls.front().id, kCall);
+        EXPECT_EQ(assistant.content, "tool planning text");
+        EXPECT_EQ(assistant.reasoning_content, "tool planning reasoning");
         const auto output = Json::parse(messages.back().content);
         if (has_executor) {
             EXPECT_EQ(output.at("fact"), "verified");
+            EXPECT_EQ(output.at("provenance").at("source_id"), "published-card");
         } else {
             EXPECT_EQ(output.at("error").at("code"),
                       static_cast<int>(core::ErrorCode::NotFound));
@@ -283,7 +291,7 @@ TEST_P(GatewayToolCallingTest, ExplicitCoordinatorOverridesAutomaticAssembly) {
 class TestAuthDatabase {
 public:
     TestAuthDatabase()
-        : path(std::filesystem::current_path() /
+        : path(std::filesystem::temp_directory_path() /
                ("gateway_tool_auth_" + std::to_string(
                     std::chrono::steady_clock::now().time_since_epoch().count()) + ".sqlite")) {}
     ~TestAuthDatabase() {
@@ -343,6 +351,53 @@ TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
 }
 
 INSTANTIATE_TEST_SUITE_P(SyncAndAsync, GatewayToolCallingTest, testing::Bool());
+
+class DenyingPolicy final : public skill::ISkillToolPolicy {
+public:
+    core::Status Authorize(const skill::SkillToolCallContext& context,
+        const skill::SkillCall&, const skill::SkillManifest&) const override {
+        EXPECT_EQ(context.user_uuid, kUser);
+        return core::Status::Error(core::ErrorCode::PermissionDenied, "trusted business context denied tool");
+    }
+    core::Status ValidateResult(const skill::SkillToolCallContext&, const skill::SkillCall&,
+        const skill::SkillManifest&, const skill::SkillResult&) const override { return core::Status::Ok(); }
+};
+
+TEST_P(GatewayToolCallingTest, RuntimeOptionsCarryBusinessAuthorizationToActualToolMessage) {
+    Harness harness;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<DenyingPolicy>();
+    options.runtime.tool_result_format = skill::ToolResultFormat::EnvelopeV1;
+    gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam()));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    Chat(server);
+    EXPECT_EQ(harness.executor->starts.load(), 0);
+    const auto requests = harness.llm_client->Requests();
+    ASSERT_EQ(requests.size(), 2u);
+    const auto result = Json::parse(requests.back().messages.back().content);
+    EXPECT_EQ(result["schema_version"], "agentloom.tool-result.v1");
+    EXPECT_EQ(result["status"], "error");
+    EXPECT_EQ(result["error"]["code"], static_cast<int>(core::ErrorCode::PermissionDenied));
+}
+
+TEST_P(GatewayToolCallingTest, RepeatedToolRequestFailsAfterOneRoundWithoutCommit) {
+    Harness harness;
+    harness.llm_client->repeat_tool_calls = true;
+    gateway::PersonaGatewayServer server(harness.Options(), harness.Dependencies(GetParam()));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "retrieve the fact";
+    const auto response = server.service().Chat(request);
+    EXPECT_EQ(response.status().code(), core::ErrorCode::FailedPrecondition);
+    EXPECT_EQ(harness.executor->starts.load(), 1);
+    EXPECT_EQ(harness.llm_client->Requests().size(), 2u);
+    EXPECT_EQ(harness.memory->admissions.load(), 0);
+    EXPECT_EQ(server.sessions().GetSessionSnapshot(kSession).value().recent_turn_count, 0u);
+}
 
 TEST(GatewayToolCallingConfigurationTest, RejectsExecutorFactoryWithoutSkillDependencies) {
     Harness harness;

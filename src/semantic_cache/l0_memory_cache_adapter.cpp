@@ -10,6 +10,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,31 @@ bool MatchesOwner(const CacheLookupRequest& req, const storage::CacheRecord& rec
         return false;
     }
     return true;
+}
+
+bool IsRecentTurn(const CacheLookupRequest& req, const storage::CacheRecord& record) {
+    if (const auto id = record.extra_metadata.find("turn_id");
+        id != record.extra_metadata.end() && !id->second.empty()) {
+        if (std::find(req.recent_turn_ids.begin(), req.recent_turn_ids.end(), id->second) !=
+            req.recent_turn_ids.end()) return true;
+        // 旧会话快照可能尚未携带 turn_id，仍需使用完整问答兼容匹配。
+    }
+    const std::string prefix = "用户: " + record.input + "\n助手: ";
+    for (const auto& recent : req.recent_turns) {
+        if (recent.rfind(prefix, 0) != 0) continue;
+        if (recent.substr(prefix.size()) == record.response) return true;
+    }
+    return false;
+}
+
+std::string RecentTurnText(const storage::CacheRecord& record) {
+    return "用户: " + record.input + "\n助手: " + record.response;
+}
+
+std::string RecentTurnKey(const storage::CacheRecord& record) {
+    const auto id = record.extra_metadata.find("turn_id");
+    if (id != record.extra_metadata.end() && !id->second.empty()) return "id:" + id->second;
+    return "text:" + RecentTurnText(record);
 }
 
 bool IsExpired(const storage::CacheRecord& record, std::int64_t now_ms) {
@@ -289,56 +315,84 @@ core::Result<CacheLookupResult> L0MemoryCacheAdapter::LookupWithEmbedding(
         return hits.status();
     }
 
-    const auto now_ms = NowUnixMs();
+    return BuildL0RecallContext(req, std::move(hits).value(), options_, NowUnixMs());
+}
+
+
+core::Result<CacheLookupResult> BuildL0RecallContext(
+    const CacheLookupRequest& req,
+    std::vector<cache_vector::SearchWithContextResult> hits,
+    const L0MemoryCacheAdapterOptions& options,
+    std::int64_t now_ms) {
     std::vector<RankedL0Hit> ranked;
-    ranked.reserve(hits.value().size());
-    for (auto& hit : hits.value()) {
-        if (!MatchesOwner(req, hit.hit) || IsExpired(hit.hit, now_ms)) {
+    ranked.reserve(hits.size());
+    for (auto& hit : hits) {
+        if (!MatchesOwner(req, hit.hit) || IsExpired(hit.hit, now_ms) ||
+            IsRecentTurn(req, hit.hit)) {
             continue;
         }
-        const float decay = TimeDecay(hit.hit.metadata.created_at_ms, now_ms, options_);
+        const float decay = TimeDecay(hit.hit.metadata.created_at_ms, now_ms, options);
         const float decayed_score = hit.score * decay;
-        if (decayed_score < options_.similarity_floor) {
+        if (decayed_score < options.similarity_floor) {
             continue;
         }
         std::erase_if(hit.context, [&](const storage::CacheRecord& neighbor) {
-            return !MatchesOwner(req, neighbor) || IsExpired(neighbor, now_ms);
+            return !MatchesOwner(req, neighbor) || IsExpired(neighbor, now_ms) ||
+                IsRecentTurn(req, neighbor);
         });
         ranked.push_back(RankedL0Hit{std::move(hit), decayed_score, decay});
     }
     std::sort(ranked.begin(), ranked.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.decayed_score > rhs.decayed_score;
     });
-    if (ranked.size() > options_.top_k) {
-        ranked.resize(options_.top_k);
+    if (ranked.size() > options.top_k) {
+        ranked.resize(options.top_k);
     }
 
     std::ostringstream payload;
     float best_score = 0.0f;
     std::size_t accepted = 0;
+    std::size_t payload_bytes = 0;
+    std::unordered_set<std::string> included_records;
     for (const auto& ranked_hit : ranked) {
         const auto& hit = ranked_hit.hit;
+        if (!included_records.insert(RecentTurnKey(hit.hit)).second) {
+            continue;
+        }
         if (accepted == 0) {
             best_score = ranked_hit.decayed_score;
         }
-        payload << "Score: " << ranked_hit.decayed_score << "\n"
+        std::ostringstream entry;
+        entry << "Score: " << ranked_hit.decayed_score << "\n"
                 << "RawScore: " << hit.score << "\n"
                 << "TimeDecay: " << ranked_hit.decay << "\n"
                 << "Q: " << hit.hit.input << "\n"
                 << "A: " << hit.hit.response << "\n";
         for (const auto& neighbor : hit.context) {
-            if (!neighbor.input.empty() || !neighbor.response.empty()) {
-                payload << "Context Q: " << neighbor.input << "\n"
+            if ((!neighbor.input.empty() || !neighbor.response.empty()) &&
+                included_records.insert(RecentTurnKey(neighbor)).second) {
+                entry << "Context Q: " << neighbor.input << "\n"
                         << "Context A: " << neighbor.response << "\n";
             }
         }
+        const auto entry_text = entry.str();
+        if (options.max_payload_bytes == 0 || payload_bytes > options.max_payload_bytes ||
+            entry_text.size() > options.max_payload_bytes - payload_bytes) {
+            return core::Status::Error(
+                core::ErrorCode::ResourceExhausted,
+                "L0 memory payload exceeds the configured byte budget");
+        }
+        payload << entry_text;
+        payload_bytes += entry_text.size();
         ++accepted;
     }
+
+    const auto serialized_payload = payload.str();
 
     CacheLookupResult result;
     result.hit = accepted > 0;
     result.similarity_score = best_score;
-    result.payload = payload.str();
+    result.payload = serialized_payload;
     result.retrieved_at = std::chrono::system_clock::now();
     return result;
 }

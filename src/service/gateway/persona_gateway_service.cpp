@@ -1087,8 +1087,12 @@ core::Status PersonaGatewayService::SubmitChat(ChatGatewayRequest request, ChatC
         return core::Status::Error(core::ErrorCode::InvalidArgument, "chat callback is required");
     }
     request.trace_id = EnsureTrace(std::move(request.trace_id));
-    if (request.session_id.empty() || request.message.empty()) {
-        return core::Status::Error(core::ErrorCode::InvalidArgument, "session_id and message are required");
+    if (request.session_id.empty() ||
+        (request.message.empty() &&
+         (!request.proactive_trigger || request.proactive_trigger->empty()))) {
+        return core::Status::Error(
+            core::ErrorCode::InvalidArgument,
+            "session_id and message or proactive_trigger are required");
     }
     auto before = sessions_.GetSessionSnapshot(request.session_id);
     if (!before.ok()) {
@@ -1107,6 +1111,7 @@ core::Status PersonaGatewayService::SubmitChat(ChatGatewayRequest request, ChatC
     persona::ChatRequest chat;
     chat.session_id = request.session_id;
     chat.user_input = request.message;
+    chat.proactive_trigger = std::move(request.proactive_trigger);
     chat.trace_id = request.trace_id;
     chat.model = request.model;
     chat.context_id = request.mode;
@@ -1182,7 +1187,8 @@ core::Status PersonaGatewayService::SubmitClassroomProactive(ClassroomProactiveG
     chat.authenticated_user_uuid = request.authenticated_user_uuid;
     chat.persona_id = route.value().persona_id;
     chat.mode = "classroom_proactive";
-    chat.message = "[proactive] frontend requested proactive generation";
+    chat.message.clear();
+    chat.proactive_trigger = "frontend requested proactive generation";
     chat.model = std::move(request.model);
     const auto classroom_id = route.value().classroom_id;
     return SubmitChat(
@@ -1236,7 +1242,8 @@ core::Status PersonaGatewayService::SubmitClassroomPoll(ClassroomPollGatewayRequ
     chat.authenticated_user_uuid = request.authenticated_user_uuid;
     chat.persona_id = decision.value().persona_id;
     chat.mode = "classroom_proactive";
-    chat.message = decision.value().trigger;
+    chat.message.clear();
+    chat.proactive_trigger = std::move(decision.value().trigger);
     chat.model = std::move(request.model);
     const auto classroom_id = decision.value().classroom_id;
     return SubmitChat(

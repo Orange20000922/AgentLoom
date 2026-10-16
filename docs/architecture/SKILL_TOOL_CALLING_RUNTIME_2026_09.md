@@ -6,6 +6,10 @@
 >
 > 面向：下游 Application 策略物化层的复用（工具工作流 + grounding + 结构化结果回填）
 
+2026-10-16：输入/输出 schema、消费者授权、版本化结果信封、可信主动事件和 L0 去重的
+当前契约见 [Skill 工具契约与可信 Turn 输入](../runtime/SKILL_TOOL_CONTRACTS.md)。
+该文同时列出 #18 尚未完成的异步 deadline、记忆数据边界和分来源预算，优先于本文早期描述。
+
 ## 1. 实现现状
 
 `src/skill/` 是一层独立的 **LLM 工具调用协议运行时**，把「工具声明 → 调用解析 → 执行 → 结果回填」这一 OpenAI-compatible function-calling 协议独立成模块，与既有的 Skill Session 生命周期（`skill_session_manager`，面向媒体/视觉长任务）解耦。

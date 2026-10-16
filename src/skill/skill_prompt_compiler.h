@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace agent::skill {
@@ -33,8 +34,16 @@ core::Result<std::vector<SkillCall>> ParseToolCalls(
     const llm::ChatCompletionResponse& response,
     const ISkillRegistry& registry);
 
+// 校验 Skill 支持的 schema 子集；不支持的断言必须显式拒绝，不能悄悄放行。
+core::Status ValidateSkillSchema(std::string_view schema_json);
+core::Status ValidateSkillJsonSchema(
+    std::string_view schema_json,
+    std::string_view value_json);
+
 // 将执行结果编码为下一轮 Chat Completions 所需的 tool 消息。
-llm::ChatMessage MakeToolResultMessage(const SkillResult& result);
+enum class ToolResultFormat { LegacyInline, EnvelopeV1 };
+llm::ChatMessage MakeToolResultMessage(
+    const SkillResult& result, ToolResultFormat format = ToolResultFormat::LegacyInline);
 
 struct SkillPromptRequest {
     std::vector<std::string> skill_ids;

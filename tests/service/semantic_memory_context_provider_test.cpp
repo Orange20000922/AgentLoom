@@ -103,8 +103,8 @@ AsyncMemoryContextRequest MakeRequest() {
     request.max_recent_turns = 2;
     request.current_session_recent = {
         ConversationTurn{.user_input = "u1", .response = "a1"},
-        ConversationTurn{.user_input = "u2", .response = "a2"},
-        ConversationTurn{.user_input = "u3", .response = "a3"},
+        ConversationTurn{.user_input = "u2", .response = "a2", .turn_id = "session-a:2"},
+        ConversationTurn{.user_input = "u3", .response = "a3", .turn_id = "session-a:3"},
     };
     return request;
 }
@@ -134,6 +134,7 @@ TEST(SemanticMemoryContextProviderTest, PreservesScopeAndCompletesAcceptedLookup
     EXPECT_EQ(lookup.persona_id, "persona-a");
     EXPECT_EQ(lookup.extra.at("trace_id"), "trace-a");
     ASSERT_EQ(lookup.recent_turns.size(), 2u);
+    EXPECT_EQ(lookup.recent_turn_ids, (std::vector<std::string>{"session-a:2", "session-a:3"}));
     EXPECT_NE(lookup.recent_turns[0].find("u2"), std::string::npos);
     EXPECT_NE(lookup.recent_turns[1].find("u3"), std::string::npos);
 

@@ -149,6 +149,8 @@ void LoadL0Memory(const Json& root, MultimodalServerOptions& options) {
     SetInt64(*section, "l0_memory", "warm_window_seconds", options.l0_memory.warm_window_seconds, 0);
     SetInt64(*section, "l0_memory", "half_life_seconds", options.l0_memory.half_life_seconds, 0);
     SetInt64(*section, "l0_memory", "max_age_seconds", options.l0_memory.max_age_seconds, 0);
+    SetSize(*section, "l0_memory", "max_payload_bytes",
+            options.l0_memory.max_payload_bytes, 1);
     SetString(*section, "l0_memory", "user_uuid", options.l0_memory.user_uuid);
 }
 

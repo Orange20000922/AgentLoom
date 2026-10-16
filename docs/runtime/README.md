@@ -10,6 +10,7 @@
 - [Net API Notes](NET_API_NOTES.md)
 - [Callback 生命周期与优雅停服](CALLBACK_LIFETIME_SHUTDOWN.md)
 - [Async gRPC Runtime](async_grpc_runtime.md)
+- [Skill 工具契约与可信 Turn 输入](SKILL_TOOL_CONTRACTS.md)
 - [GStreamer Windows Setup](../development/GSTREAMER_WINDOWS_SETUP.md)
 
 ## 模型与链路
