@@ -457,11 +457,12 @@ protected:
     }
 
     bool HandleTransportError(std::string_view stage, const beast::error_code& error) {
-        if (!error) {
-            return false;
-        }
+        // 取消不能撤回已排队的成功回调，先阻止终态 operation 继续访问连接。
         if (completed_.load(std::memory_order_acquire)) {
             return true;
+        }
+        if (!error) {
+            return false;
         }
         if (timed_out_.load(std::memory_order_acquire)) {
             Finish(core::Status::Error(
@@ -555,31 +556,31 @@ private:
                 }
                 self->connection_->stream.async_connect(
                     endpoints,
-                    [self](const beast::error_code& connect_error,
+                    asio::bind_executor(self->executor(), [self](const beast::error_code& connect_error,
                            const tcp::resolver::results_type::endpoint_type&) {
                         if (self->HandleTransportError("TCP connect", connect_error)) {
                             return;
                         }
                         self->Write();
-                    });
+                    }));
             });
     }
 
     void Write() {
         auto self = std::static_pointer_cast<PlainAsyncHttpOperation>(shared_from_this());
         http::async_write(connection_->stream, request(),
-            [self](const beast::error_code& error, std::size_t) {
+            asio::bind_executor(self->executor(), [self](const beast::error_code& error, std::size_t) {
                 if (self->HandleTransportError("HTTP write", error)) {
                     return;
                 }
                 self->Read();
-            });
+            }));
     }
 
     void Read() {
         auto self = std::static_pointer_cast<PlainAsyncHttpOperation>(shared_from_this());
         http::async_read(connection_->stream, buffer(), response(),
-            [self](const beast::error_code& error, std::size_t) {
+            asio::bind_executor(self->executor(), [self](const beast::error_code& error, std::size_t) {
                 if (self->HandleTransportError("HTTP read", error)) {
                     return;
                 }
@@ -590,13 +591,13 @@ private:
                     self->owner().ReleaseIdle(std::move(self->connection_));
                 }
                 self->Finish(std::move(result));
-            });
+            }));
     }
 
     void CloseTransport() noexcept override {
         if (connection_) {
             connection_->Close();
-            connection_.reset();
+            // Beast 组合操作仍借用 stream，等待全部回调释放 operation 后再销毁。
         }
     }
 
@@ -646,42 +647,42 @@ private:
                 }
                 beast::get_lowest_layer(self->connection_->stream).async_connect(
                     endpoints,
-                    [self](const beast::error_code& connect_error,
+                    asio::bind_executor(self->executor(), [self](const beast::error_code& connect_error,
                            const tcp::resolver::results_type::endpoint_type&) {
                         if (self->HandleTransportError("TCP connect", connect_error)) {
                             return;
                         }
                         self->Handshake();
-                    });
+                    }));
             });
     }
 
     void Handshake() {
         auto self = std::static_pointer_cast<TlsAsyncHttpOperation>(shared_from_this());
         connection_->stream.async_handshake(ssl::stream_base::client,
-            [self](const beast::error_code& error) {
+            asio::bind_executor(self->executor(), [self](const beast::error_code& error) {
                 if (self->HandleTransportError("TLS handshake", error)) {
                     return;
                 }
                 self->Write();
-            });
+            }));
     }
 
     void Write() {
         auto self = std::static_pointer_cast<TlsAsyncHttpOperation>(shared_from_this());
         http::async_write(connection_->stream, request(),
-            [self](const beast::error_code& error, std::size_t) {
+            asio::bind_executor(self->executor(), [self](const beast::error_code& error, std::size_t) {
                 if (self->HandleTransportError("HTTPS write", error)) {
                     return;
                 }
                 self->Read();
-            });
+            }));
     }
 
     void Read() {
         auto self = std::static_pointer_cast<TlsAsyncHttpOperation>(shared_from_this());
         http::async_read(connection_->stream, buffer(), response(),
-            [self](const beast::error_code& error, std::size_t) {
+            asio::bind_executor(self->executor(), [self](const beast::error_code& error, std::size_t) {
                 if (self->HandleTransportError("HTTPS read", error)) {
                     return;
                 }
@@ -692,13 +693,13 @@ private:
                     self->owner().ReleaseIdle(std::move(self->connection_));
                 }
                 self->Finish(std::move(result));
-            });
+            }));
     }
 
     void CloseTransport() noexcept override {
         if (connection_) {
             connection_->Close();
-            connection_.reset();
+            // Beast 组合操作仍借用 stream，等待全部回调释放 operation 后再销毁。
         }
     }
 
