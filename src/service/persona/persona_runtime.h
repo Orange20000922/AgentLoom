@@ -195,6 +195,8 @@ struct ChatRequest {
     std::string model;
     bool stream = false;
     llm::LlmEventSink event_sink;
+    // 新增字段放在末尾，避免旧 SDK 聚合初始化将 trace_id 误解释为主动事件。
+    std::optional<std::string> proactive_trigger;
 };
 
 struct ChatLatencyBreakdown {
@@ -280,6 +282,12 @@ struct PersonaRuntimeOptions {
     std::string default_model;
     EmotionCalibrationOptions emotion_calibration;
     EmotionGenerationOptions emotion_generation;
+    // UTF-8 Unicode 码点数；不是字节数、字素簇数或模型 token 数。
+    std::size_t max_prompt_characters = 128 * 1024;
+    // 消费者从可信业务上下文实现授权/来源校验；默认保持旧工具结果格式。
+    std::shared_ptr<const agent::skill::ISkillToolPolicy> skill_tool_policy;
+    agent::skill::ToolResultFormat tool_result_format = agent::skill::ToolResultFormat::LegacyInline;
+    std::size_t max_tool_result_bytes = 64 * 1024;
 };
 
 class PersonaRuntime {
@@ -386,7 +394,13 @@ private:
         const RecalledContext& memory,
         const EmotionAnalysis& emotion,
         std::string_view user_input,
+        const std::optional<std::string>& proactive_trigger,
         const std::optional<std::string>& emotion_hint) const;
+    core::Status ValidatePromptCharacterBudget(
+        const std::vector<llm::ChatMessage>& messages,
+        const std::vector<llm::ChatCompletionRequest::Tool>& tools,
+        std::string_view session_id,
+        std::string_view trace_id) const;
     core::Status MaybeRecordEmotionCalibrationSample(const SessionState& session,
                                                      const ChatRequest& request,
                                                      const EmotionAnalysis& emotion,

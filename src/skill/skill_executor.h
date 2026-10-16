@@ -10,6 +10,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <optional>
 
 namespace agent::skill {
 
@@ -85,14 +86,31 @@ private:
     std::unordered_map<std::string, std::shared_ptr<ISkillExecutor>> active_executions_;
 };
 
+class ISkillToolPolicy;
+
 struct SkillToolCallContext {
     std::string session_id;
     std::string user_uuid;
     std::string persona_id;
     std::string trace_id;
     std::chrono::milliseconds timeout{30000};
-    // 非空时限制本轮只能执行已注入并授权的 function name。
-    std::vector<std::string> allowed_tool_names;
+    // nullopt 兼容旧直接调用方；显式空集合拒绝所有工具，Runtime 始终传入本轮声明集合。
+    std::optional<std::vector<std::string>> allowed_tool_names;
+    std::size_t max_result_bytes = 64 * 1024;
+    ToolResultFormat result_format = ToolResultFormat::LegacyInline;
+    std::shared_ptr<const ISkillToolPolicy> policy;
+};
+
+// 业务身份、审批发布、来源版本和引用由消费者校验；此接口不拥有 Session 或调度资源。
+class ISkillToolPolicy {
+public:
+    virtual ~ISkillToolPolicy() = default;
+    virtual core::Status Authorize(
+        const SkillToolCallContext& context, const SkillCall& call,
+        const SkillManifest& manifest) const = 0;
+    virtual core::Status ValidateResult(
+        const SkillToolCallContext& context, const SkillCall& call,
+        const SkillManifest& manifest, const SkillResult& result) const = 0;
 };
 
 class ISkillToolCallCoordinator {

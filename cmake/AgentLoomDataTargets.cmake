@@ -154,6 +154,7 @@ if(BERT_BUILD_TESTS)
         tests/semantic_cache/semantic_cache_pipeline_test.cpp
         tests/semantic_cache/test_reload_batch_cycle.cpp
         tests/semantic_cache/l0_batch_metadata_store_test.cpp
+        tests/semantic_cache/l0_recall_context_test.cpp
     )
 
     target_link_libraries(semantic_cache_tests PRIVATE

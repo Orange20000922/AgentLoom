@@ -3,6 +3,9 @@
 #include <condition_variable>
 #include <atomic>
 #include <algorithm>
+#include "../core/text_validation.h"
+#include "../core/logger_adapter.h"
+#include <exception>
 
 namespace agent::skill {
 
@@ -138,8 +141,91 @@ SkillToolCallCoordinator::SkillToolCallCoordinator(
     : registry_(std::move(registry)), invocation_(std::move(invocation)) {}
 
 namespace {
-bool IsAllowedTool(std::string_view tool_name, const std::vector<std::string>& allowed) {
-    return allowed.empty() || std::find(allowed.begin(), allowed.end(), tool_name) != allowed.end();
+bool IsAllowedTool(
+    std::string_view tool_name,
+    const std::optional<std::vector<std::string>>& allowed) {
+    return !allowed ||
+        std::find(allowed->begin(), allowed->end(), tool_name) != allowed->end();
+}
+
+void ValidateSkillOutput(
+    SkillResult& result,
+    const SkillManifest& manifest,
+    const SkillCall& call,
+    const SkillToolCallContext& context) {
+    if ((!result.call_id.empty() && result.call_id != call.call_id) ||
+        (!result.skill_id.empty() && result.skill_id != call.skill_id)) {
+        result.status = core::Status::Error(core::ErrorCode::DataLoss,
+                                           "tool result identity does not match invocation");
+    }
+    // 执行器不能更换 tool_call_id；空 ID 按真实调用补齐，失败也必须关联原调用。
+    result.call_id = call.call_id;
+    result.skill_id = call.skill_id;
+    if (!result.status.ok()) return;
+    if (context.max_result_bytes == 0 || result.result_json.size() > context.max_result_bytes ||
+        result.provenance_json.size() > context.max_result_bytes - result.result_json.size()) {
+        result.status = core::Status::Error(core::ErrorCode::ResourceExhausted,
+                                           "tool result exceeds configured byte budget");
+        result.result_json.clear();
+        result.provenance_json.clear();
+        return;
+    }
+    const auto output = result.result_json.empty() ? std::string("{}") : result.result_json;
+    if (auto status = ValidateSkillJsonSchema(manifest.output_schema_json, output); !status.ok()) {
+        result.status = std::move(status);
+        result.result_json.clear();
+        result.provenance_json.clear();
+    }
+    if (result.status.ok() && context.policy) {
+        result.status = context.policy->ValidateResult(context, call, manifest, result);
+    }
+}
+
+llm::ChatMessage CheckedToolMessage(
+    SkillResult result, const SkillManifest& manifest,
+    const SkillCall& call, const SkillToolCallContext& context) {
+    try {
+        ValidateSkillOutput(result, manifest, call, context);
+    } catch (const std::exception&) {
+        result.call_id = call.call_id;
+        result.skill_id = call.skill_id;
+        result.status = core::Status::Error(core::ErrorCode::InternalError,
+                                           "tool result validator threw an exception");
+    }
+    auto message = MakeToolResultMessage(result, context.result_format);
+    if (!result.status.ok()) {
+        core::LoggerAdapter::ForModule("skill").warn(
+            "[trace={}] tool result rejected skill={} code={}",
+            context.trace_id, call.skill_id, static_cast<int>(result.status.code()));
+    }
+    if (message.content.size() > context.max_result_bytes) {
+        result.status = core::Status::Error(core::ErrorCode::ResourceExhausted,
+                                           "serialized tool message exceeds configured byte budget");
+        // 错误控制消息保留原调用 ID，允许小预算下固定错误信封略大于业务 payload 配额。
+        message = MakeToolResultMessage(result, context.result_format);
+    }
+    return message;
+}
+
+core::Status AuthorizeTool(
+    const SkillToolCallContext& context, const SkillCall& call, const SkillManifest& manifest) {
+    if (!IsAllowedTool(call.tool_name, context.allowed_tool_names)) {
+        core::LoggerAdapter::ForModule("skill").warn(
+            "[trace={}] undeclared tool rejected name={}", context.trace_id, call.tool_name);
+        return core::Status::Error(core::ErrorCode::PermissionDenied,
+                                   "tool call is not allowed for this turn");
+    }
+    try {
+        auto status = context.policy ? context.policy->Authorize(context, call, manifest) : core::Status::Ok();
+        if (!status.ok()) {
+            core::LoggerAdapter::ForModule("skill").warn(
+                "[trace={}] tool authorization rejected skill={} code={}",
+                context.trace_id, call.skill_id, static_cast<int>(status.code()));
+        }
+        return status;
+    } catch (const std::exception&) {
+        return core::Status::Error(core::ErrorCode::InternalError, "tool authorizer threw an exception");
+    }
 }
 }
 
@@ -155,14 +241,14 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
     std::vector<llm::ChatMessage> messages;
     messages.reserve(calls.value().size());
     for (const auto& call : calls.value()) {
-        if (!IsAllowedTool(call.tool_name, context.allowed_tool_names)) {
+        auto manifest = registry_->Require(call.skill_id, call.skill_version);
+        if (!manifest.ok()) return manifest.status();
+        if (auto status = AuthorizeTool(context, call, manifest.value()); !status.ok()) {
             SkillResult rejected;
             rejected.call_id = call.call_id;
             rejected.skill_id = call.skill_id;
-            rejected.status = core::Status::Error(
-                core::ErrorCode::PermissionDenied,
-                "tool call is not allowed for this turn");
-            messages.push_back(MakeToolResultMessage(rejected));
+            rejected.status = std::move(status);
+            messages.push_back(CheckedToolMessage(std::move(rejected), manifest.value(), call, context));
             continue;
         }
         struct CompletionState {
@@ -193,11 +279,14 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
             failed.call_id = call.call_id;
             failed.skill_id = call.skill_id;
             failed.status = started.status();
-            messages.push_back(MakeToolResultMessage(failed));
+            messages.push_back(CheckedToolMessage(std::move(failed), manifest.value(), call, context));
             continue;
         }
         std::unique_lock lock(completion->mutex);
         if (!completion->condition.wait_for(lock, context.timeout, [&] { return completion->done; })) {
+            completion->done = true;
+            // Cancel 允许同步触发 on_result；持有完成锁调用它会发生自锁。
+            lock.unlock();
             SkillResult timed_out;
             timed_out.call_id = call.call_id;
             timed_out.skill_id = call.skill_id;
@@ -205,10 +294,12 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
             timed_out.status = core::Status::Error(core::ErrorCode::Timeout,
                                                     "skill execution timed out");
             invocation_->Cancel(started.value().execution_id);
-            messages.push_back(MakeToolResultMessage(timed_out));
+            messages.push_back(CheckedToolMessage(std::move(timed_out), manifest.value(), call, context));
             continue;
         }
-        messages.push_back(MakeToolResultMessage(*completion->result));
+        auto result = std::move(*completion->result);
+        lock.unlock();
+        messages.push_back(CheckedToolMessage(std::move(result), manifest.value(), call, context));
     }
     return messages;
 }
@@ -234,6 +325,7 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
     struct State {
         std::vector<SkillCall> calls;
         SkillToolCallContext context;
+        std::shared_ptr<const ISkillRegistry> registry;
         std::shared_ptr<ISkillInvocationService> invocation;
         std::vector<llm::ChatMessage> messages;
         std::size_t next = 0;
@@ -243,6 +335,7 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
     auto state = std::make_shared<State>();
     state->calls = std::move(calls).value();
     state->context = std::move(context);
+    state->registry = registry_;
     state->invocation = invocation_;
     state->completion = std::move(completion);
     auto advance = std::make_shared<std::function<void()>>();
@@ -259,14 +352,16 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
             return;
         }
         const auto call = state->calls[state->next++];
-        if (!IsAllowedTool(call.tool_name, state->context.allowed_tool_names)) {
+        auto manifest = state->registry->Require(call.skill_id, call.skill_version);
+        const auto authorization = manifest.ok()
+            ? AuthorizeTool(state->context, call, manifest.value()) : manifest.status();
+        if (!authorization.ok()) {
             SkillResult rejected;
             rejected.call_id = call.call_id;
             rejected.skill_id = call.skill_id;
-            rejected.status = core::Status::Error(
-                core::ErrorCode::PermissionDenied,
-                "tool call is not allowed for this turn");
-            state->messages.push_back(MakeToolResultMessage(rejected));
+            rejected.status = authorization;
+            state->messages.push_back(CheckedToolMessage(
+                std::move(rejected), manifest.ok() ? manifest.value() : SkillManifest{}, call, state->context));
             (*self)();
             return;
         }
@@ -276,12 +371,14 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
         request.user_uuid = state->context.user_uuid;
         request.persona_id = state->context.persona_id;
         request.trace_id = state->context.trace_id;
+        const auto declared_manifest = manifest.value();
         auto call_finished = std::make_shared<std::atomic<bool>>(false);
         SkillExecutionCallbacks callbacks;
         // on_result 持有 self 强引用，保证执行器回调完成前状态机存活（与上方 weak_ptr 配合无环）。
-        callbacks.on_result = [state, self, call_finished](SkillResult result) mutable {
+        callbacks.on_result = [state, self, call_finished, declared_manifest, call](SkillResult result) mutable {
             if (call_finished->exchange(true, std::memory_order_acq_rel)) return;
-            state->messages.push_back(MakeToolResultMessage(result));
+            state->messages.push_back(CheckedToolMessage(
+                std::move(result), declared_manifest, call, state->context));
             (*self)();
         };
         auto started = state->invocation->Invoke(std::move(request), std::move(callbacks));
@@ -291,7 +388,8 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
             result.call_id = call.call_id;
             result.skill_id = call.skill_id;
             result.status = started.status();
-            state->messages.push_back(MakeToolResultMessage(result));
+            state->messages.push_back(CheckedToolMessage(
+                std::move(result), declared_manifest, call, state->context));
             (*self)();
         }
     };

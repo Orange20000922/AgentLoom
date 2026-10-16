@@ -601,6 +601,7 @@ core::Result<L0MemoryCacheBundle> CreateL0MemoryCache(
     options.warm_window_seconds = config.l0_memory.warm_window_seconds;
     options.half_life_seconds = config.l0_memory.half_life_seconds;
     options.max_age_seconds = config.l0_memory.max_age_seconds;
+    options.max_payload_bytes = config.l0_memory.max_payload_bytes;
     L0MemoryCacheBundle bundle;
     bundle.redis_pool = redis;
     bundle.adapter = std::make_shared<agent::semantic_cache::L0MemoryCacheAdapter>(

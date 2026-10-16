@@ -1,5 +1,6 @@
 #include "skill_registry.h"
 #include "skill_manifest_json.h"
+#include "skill_prompt_compiler.h"
 
 #include <nlohmann/json.hpp>
 #include <mutex>
@@ -44,6 +45,8 @@ core::Status ValidateManifest(const SkillManifest& manifest) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    std::string("invalid skill schema: ") + error.what());
     }
+    if (auto status = ValidateSkillSchema(manifest.input_schema_json); !status.ok()) return status;
+    if (auto status = ValidateSkillSchema(manifest.output_schema_json); !status.ok()) return status;
     if (manifest.max_parallel_per_session == 0) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "max_parallel_per_session must be positive");

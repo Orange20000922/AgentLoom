@@ -196,7 +196,10 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                             names.reserve(prepared_value.tools.size());
                             for (const auto& tool : prepared_value.tools) names.push_back(tool.name);
                             return names;
-                        }()};
+                        }(),
+                        options_.max_tool_result_bytes,
+                        options_.tool_result_format,
+                        options_.skill_tool_policy};
                     auto completion_holder =
                         std::make_shared<std::function<void(core::Result<CompletedChat>)>>(
                             std::move(completion));
@@ -220,6 +223,12 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                             prepared.messages.end(),
                             std::make_move_iterator(tool_messages.value().begin()),
                             std::make_move_iterator(tool_messages.value().end()));
+                        if (auto budget = ValidatePromptCharacterBudget(
+                                prepared.messages, prepared.tools, session.session_id,
+                                prepared.request.trace_id); !budget.ok()) {
+                            (*completion_holder)(budget);
+                            return;
+                        }
                         auto status = CompleteWithLlmAsync(
                             std::move(session), std::move(prepared), *completion_holder);
                         if (!status.ok()) {
@@ -234,9 +243,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                     }
                     return;
                 }
-                if (prepared_value.request.stream && !llm_completion.tool_calls.empty()) {
+                if (!llm_completion.tool_calls.empty()) {
                     completion(core::Status::Error(core::ErrorCode::FailedPrecondition,
-                                                   "streaming tool loop budget exhausted or coordinator missing"));
+                                                   "tool loop budget exhausted or coordinator missing"));
                     return;
                 }
                 auto completion_holder =

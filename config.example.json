@@ -18,6 +18,7 @@
     "session_max_recent_turns": 20,
     "session_max_active_sessions": 1024,
     "runtime_recent_raw_turns": 10,
+    "runtime_max_prompt_characters": 131072,
     "runtime_default_model": "deepseek-chat",
     "compute_pool": {
       "worker_count": 4,
@@ -220,6 +221,7 @@
     "warm_window_seconds": 3600,
     "half_life_seconds": 172800,
     "max_age_seconds": 604800,
+    "max_payload_bytes": 65536,
     "user_uuid": "gateway-l0"
   },
   "document_store": {

@@ -927,6 +927,7 @@ TEST(ConfigPersonaGatewaySectionTest, JsonLoadsE2EGatewayOptionsAndResolvesStati
             "session_max_recent_turns": 24,
             "session_max_active_sessions": 37,
             "runtime_recent_raw_turns": 10,
+            "runtime_max_prompt_characters": 4096,
             "runtime_default_model": "e2e-model",
             "personas": {
                 "dazhi": {
@@ -1001,6 +1002,7 @@ TEST(ConfigPersonaGatewaySectionTest, JsonLoadsE2EGatewayOptionsAndResolvesStati
     EXPECT_EQ(opts.persona_gateway.session_max_recent_turns, 24u);
     EXPECT_EQ(opts.persona_gateway.session_max_active_sessions, 37u);
     EXPECT_EQ(opts.persona_gateway.runtime_recent_raw_turns, 10u);
+    EXPECT_EQ(opts.persona_gateway.runtime_max_prompt_characters, 4096u);
     EXPECT_EQ(opts.persona_gateway.runtime_default_model, "e2e-model");
     ASSERT_EQ(opts.persona_gateway.personas.size(), 2u);
     EXPECT_EQ(opts.persona_gateway.personas[0].persona_id, "dazhi");
@@ -1096,6 +1098,7 @@ TEST(ConfigPersonaGatewaySectionTest, CliOverridesGatewayJson) {
     EXPECT_EQ(opts.persona_gateway.session_max_recent_turns, 32u);
     EXPECT_EQ(opts.persona_gateway.session_max_active_sessions, 41u);
     EXPECT_EQ(opts.persona_gateway.runtime_recent_raw_turns, 12u);
+    EXPECT_EQ(opts.persona_gateway.runtime_max_prompt_characters, 131072u);
     EXPECT_EQ(opts.persona_gateway.runtime_default_model, "cli-model");
     EXPECT_FALSE(opts.persona_gateway.request_filter_enabled);
 }

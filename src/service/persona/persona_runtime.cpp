@@ -1,8 +1,10 @@
 #include "persona_runtime.h"
+#include "../../core/text_validation.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string_view>
@@ -25,6 +27,47 @@ std::string FormatL3Facts(const std::vector<vector_storage::EntryRecord>& facts)
     }
     out += "</memory_l3>";
     return out;
+}
+core::Result<std::size_t> PromptRequestCharacters(
+    const std::vector<llm::ChatMessage>& messages,
+    const std::vector<llm::ChatCompletionRequest::Tool>& tools) {
+    std::size_t characters = 0;
+    const auto add = [&characters](std::string_view value) -> core::Status {
+        if (!core::IsValidUtf8(value)) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "prompt contains invalid UTF-8 text");
+        }
+        const auto count = static_cast<std::size_t>(std::count_if(
+            value.begin(), value.end(), [](unsigned char byte) { return (byte & 0xC0) != 0x80; }));
+        if (count > std::numeric_limits<std::size_t>::max() - characters) {
+            return core::Status::Error(core::ErrorCode::ResourceExhausted,
+                                       "prompt character count overflow");
+        }
+        characters += count;
+        return core::Status::Ok();
+    };
+    for (const auto& message : messages) {
+        if (auto status = add(message.content); !status.ok()) return status;
+        if (message.reasoning_content) {
+            if (auto status = add(*message.reasoning_content); !status.ok()) return status;
+        }
+        if (auto status = add(message.tool_call_id); !status.ok()) return status;
+        for (const auto& part : message.parts) {
+            if (auto status = add(part.text); !status.ok()) return status;
+            if (auto status = add(part.image_url); !status.ok()) return status;
+        }
+        for (const auto& call : message.tool_calls) {
+            if (auto status = add(call.id); !status.ok()) return status;
+            if (auto status = add(call.name); !status.ok()) return status;
+            if (auto status = add(call.arguments_json); !status.ok()) return status;
+        }
+    }
+    for (const auto& tool : tools) {
+        if (auto status = add(tool.name); !status.ok()) return status;
+        if (auto status = add(tool.description); !status.ok()) return status;
+        if (auto status = add(tool.parameters_json); !status.ok()) return status;
+    }
+    return characters;
 }
 std::chrono::milliseconds Since(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -106,12 +149,6 @@ private:
     std::atomic<bool> completed_{false};
     IAsyncMemoryContextProvider::BuildCompletion completion_;
 };
-bool IsProactiveInput(std::string_view input) {
-    return input.rfind("[proactive]", 0) == 0 ||
-           input.rfind("[proactive_decision]", 0) == 0 ||
-           input.rfind("conversation idle for ", 0) == 0 ||
-           input.rfind("[system_event]", 0) == 0;
-}
 double TopProbabilityMargin(const EmotionInfo& emotion) {
     if (emotion.probabilities.size() < 2) {
         return 1.0;
@@ -209,8 +246,10 @@ core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
         lookup.persona_id = request.persona_id;
         lookup.extra["trace_id"] = request.trace_id;
         lookup.recent_turns.reserve(context.recent_turns.size());
+        lookup.recent_turn_ids.reserve(context.recent_turns.size());
         for (const auto& turn : context.recent_turns) {
             lookup.recent_turns.push_back(FormatRecentTurn(turn));
+            lookup.recent_turn_ids.push_back(turn.turn_id);
         }
         auto l0 = l0_cache_->Lookup(lookup);
         if (!l0.ok()) {
@@ -316,8 +355,10 @@ core::Status SemanticMemoryContextProvider::BuildContextAsync(
     lookup.persona_id = request.persona_id;
     lookup.extra["trace_id"] = request.trace_id;
     lookup.recent_turns.reserve(context.recent_turns.size());
+    lookup.recent_turn_ids.reserve(context.recent_turns.size());
     for (const auto& turn : context.recent_turns) {
         lookup.recent_turns.push_back(FormatRecentTurn(turn));
+        lookup.recent_turn_ids.push_back(turn.turn_id);
     }
     core::Status start_status;
     try {
@@ -384,6 +425,7 @@ core::Status SemanticMemoryContextProvider::AdmitTurnAsync(
     store.origin.session_id = std::move(session_id);
     store.origin.persona_id = turn.persona_id;
     store.origin.extra["trace_id"] = std::move(trace_id);
+    if (!turn.turn_id.empty()) store.origin.extra["turn_id"] = turn.turn_id;
     store.response_payload = turn.response;
     store.answer_type = semantic_cache::AnswerType::Personalized;
     auto completion_state = std::make_shared<std::atomic<bool>>(false);
@@ -443,6 +485,7 @@ core::Status SemanticMemoryContextProvider::AdmitTurn(std::string_view session_i
     store.origin.user_id = std::string(user_uuid);
     store.origin.session_id = std::string(session_id);
     store.origin.persona_id = turn.persona_id;
+    if (!turn.turn_id.empty()) store.origin.extra["turn_id"] = turn.turn_id;
     store.origin.extra["emotion"] = turn.emotion;
     store.origin.extra["intensity"] = std::to_string(turn.intensity);
     store.origin.extra["behavior"] = turn.behavior;
@@ -492,6 +535,7 @@ struct PersonaRuntime::AsyncTurnOperation final {
           finish(std::move(finish_value)),
           user_input(request.user_input),
           context_id(request.context_id),
+          turn_id(session.session_id + ":" + std::to_string(session.metrics.turn_count + 1)),
           persona_id(session.persona_id),
           submitted_at(submitted_at_value),
           compute_started_at(std::chrono::steady_clock::now()),
@@ -555,6 +599,7 @@ struct PersonaRuntime::AsyncTurnOperation final {
     SessionManager::SessionTurnAsyncFinish finish;
     std::string user_input;
     std::string context_id;
+    std::string turn_id;
     std::string persona_id;
     std::chrono::steady_clock::time_point submitted_at;
     std::chrono::steady_clock::time_point compute_started_at;
@@ -656,8 +701,12 @@ core::Status PersonaRuntime::SubmitChat(ChatRequest request, ChatCallback callba
     if (!memory_provider_ || !emotion_analyzer_ || !llm_client_) {
         return core::Status::Error(core::ErrorCode::FailedPrecondition, "persona runtime dependencies are incomplete");
     }
-    if (request.session_id.empty() || request.user_input.empty()) {
-        return core::Status::Error(core::ErrorCode::InvalidArgument, "session_id and user_input are required");
+    if (request.session_id.empty() ||
+        (request.user_input.empty() &&
+         (!request.proactive_trigger || request.proactive_trigger->empty()))) {
+        return core::Status::Error(
+            core::ErrorCode::InvalidArgument,
+            "session_id and user_input or proactive_trigger are required");
     }
     if (auto status = ValidateEmotionGenerationOptions(options_.emotion_generation); !status.ok()) {
         logger_.warn("[persona_runtime] generation options rejected: {}", status.message());
@@ -757,6 +806,8 @@ core::Status PersonaRuntime::SubmitChat(ChatRequest request, ChatCallback callba
             auto session = snapshot.state;
             const auto user_input = request.user_input;
             const auto context_id = request.context_id;
+            const auto turn_id = session.session_id + ":" +
+                std::to_string(session.metrics.turn_count + 1);
             const auto compute_started_at = std::chrono::steady_clock::now();
             auto prepared = PrepareChat(session, std::move(request));
             if (!prepared.ok()) {
@@ -779,6 +830,7 @@ core::Status PersonaRuntime::SubmitChat(ChatRequest request, ChatCallback callba
             commit.turn.tone = completed.value().user_emotion.tone;
             commit.turn.response = completed.value().response;
             commit.turn.context_id = context_id;
+            commit.turn.turn_id = turn_id;
             commit.turn.persona_id = session.persona_id;
             commit.turn.valence = session.emotion_state.state().valence;
             commit.turn.arousal = session.emotion_state.state().arousal;
@@ -991,6 +1043,7 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatAfterEmoti
                                   prepared.memory,
                                   prepared.user_emotion,
                                   prepared.request.user_input,
+                                  prepared.request.proactive_trigger,
                                   hint);
     if (!messages.ok()) {
         logger_.warn("[trace={}] [persona_runtime] prompt build failed session={} code={} reason={}",
@@ -1001,6 +1054,9 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatAfterEmoti
         return messages.status();
     }
     prepared.messages = std::move(messages).value();
+    if (auto status = ValidatePromptCharacterBudget(
+            prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
+        !status.ok()) return status;
     prepared.latency.prompt_build = Since(prompt_start);
     logger_.info("[trace={}] [persona_runtime] prompt build done session={} latency_ms={} messages={}",
                  prepared.request.trace_id,
@@ -1023,6 +1079,7 @@ core::Result<std::vector<llm::ChatMessage>> PersonaRuntime::BuildMessages(
     const RecalledContext& memory,
     const EmotionAnalysis& emotion,
     std::string_view user_input,
+    const std::optional<std::string>& proactive_trigger,
     const std::optional<std::string>& emotion_hint) const {
     if (!session.prompt_builder) {
         return core::Status::Error(core::ErrorCode::FailedPrecondition, "session prompt builder is missing");
@@ -1037,10 +1094,10 @@ core::Result<std::vector<llm::ChatMessage>> PersonaRuntime::BuildMessages(
     }
 
     auto system_prompt = std::move(system).value();
-    const bool proactive = IsProactiveInput(user_input);
-    if (proactive) {
+    const bool proactive = proactive_trigger.has_value();
+    if (proactive && !proactive_trigger->empty()) {
         system_prompt += "\n<proactive_trigger>";
-        system_prompt.append(user_input);
+        system_prompt.append(*proactive_trigger);
         system_prompt += "</proactive_trigger>";
         system_prompt += "\n你可以主动找话题聊，或者接上之前的对话继续说。如果实在没什么好说的，回复空字符串即可。";
     }
@@ -1056,8 +1113,27 @@ core::Result<std::vector<llm::ChatMessage>> PersonaRuntime::BuildMessages(
             messages.push_back(llm::ChatMessage{llm::ChatRole::Assistant, turn.response});
         }
     }
-    messages.push_back(llm::ChatMessage{llm::ChatRole::User, proactive ? std::string("...") : std::string(user_input)});
+    messages.push_back(llm::ChatMessage{
+        llm::ChatRole::User,
+        proactive ? std::string("...") : std::string(user_input)});
     return messages;
+}
+
+core::Status PersonaRuntime::ValidatePromptCharacterBudget(
+    const std::vector<llm::ChatMessage>& messages,
+    const std::vector<llm::ChatCompletionRequest::Tool>& tools,
+    std::string_view session_id,
+    std::string_view trace_id) const {
+    auto prompt_characters = PromptRequestCharacters(messages, tools);
+    if (!prompt_characters.ok()) return prompt_characters.status();
+    if (options_.max_prompt_characters == 0 ||
+        prompt_characters.value() > options_.max_prompt_characters) {
+        logger_.warn("[trace={}] [persona_runtime] prompt rejected session={} characters={} budget={}",
+                     trace_id, session_id, prompt_characters.value(), options_.max_prompt_characters);
+        return core::Status::Error(core::ErrorCode::ResourceExhausted,
+                                   "prompt exceeds the configured UTF-8 character budget");
+    }
+    return core::Status::Ok();
 }
 
 core::Status PersonaRuntime::MaybeRecordEmotionCalibrationSample(
@@ -1157,6 +1233,8 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
             prepared.total_tokens += completion.total_tokens;
             llm::ChatMessage assistant;
             assistant.role = llm::ChatRole::Assistant;
+            assistant.content = completion.content;
+            assistant.reasoning_content = completion.reasoning_content;
             assistant.tool_calls = completion.tool_calls;
             prepared.messages.push_back(std::move(assistant));
             auto tool_messages = skill_tool_coordinator_->Execute(
@@ -1172,15 +1250,25 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
                         names.reserve(prepared.tools.size());
                         for (const auto& tool : prepared.tools) names.push_back(tool.name);
                         return names;
-                    }()});
+                    }(),
+                    options_.max_tool_result_bytes,
+                    options_.tool_result_format,
+                    options_.skill_tool_policy});
             if (!tool_messages.ok()) return tool_messages.status();
             prepared.messages.insert(prepared.messages.end(),
                                      std::make_move_iterator(tool_messages.value().begin()),
                                      std::make_move_iterator(tool_messages.value().end()));
+            if (auto budget = ValidatePromptCharacterBudget(
+                    prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
+                !budget.ok()) return budget;
             llm_req.messages = prepared.messages;
             auto follow_up = llm_client_->Complete(llm_req);
             if (!follow_up.ok()) return follow_up.status();
             completion = std::move(follow_up).value();
+        }
+        if (!completion.tool_calls.empty()) {
+            return core::Status::Error(core::ErrorCode::FailedPrecondition,
+                                       "tool loop budget exhausted or coordinator missing");
         }
     }
     auto finalized = FinalizeLlmCompletion(
@@ -1201,6 +1289,8 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
     turn.tone = value.response.user_emotion.tone;
     turn.response = value.response.response;
     turn.context_id = turn_context_id;
+    turn.turn_id = session.session_id + ":" +
+        std::to_string(session.metrics.turn_count + 1);
     turn.persona_id = session.persona_id;
     turn.valence = value.emotion_state.state().valence;
     turn.arousal = value.emotion_state.state().arousal;
@@ -1480,7 +1570,8 @@ void PersonaRuntime::OnAsyncLlmCompleted(
                     .context_id = operation->context_id,
                     .persona_id = operation->persona_id,
                     .valence = completed_holder->emotion_state.state().valence,
-                    .arousal = completed_holder->emotion_state.state().arousal},
+                    .arousal = completed_holder->emotion_state.state().arousal,
+                    .turn_id = operation->turn_id},
                 completed_holder->response.trace_id,
                 [this, operation, completed_holder](core::Status status) mutable {
                     OnAsyncMemoryAdmissionCompleted(
@@ -1508,7 +1599,8 @@ void PersonaRuntime::OnAsyncLlmCompleted(
                 .context_id = operation->context_id,
                 .persona_id = operation->persona_id,
                 .valence = completed_holder->emotion_state.state().valence,
-                .arousal = completed_holder->emotion_state.state().arousal};
+                .arousal = completed_holder->emotion_state.state().arousal,
+                .turn_id = operation->turn_id};
             auto status = memory_provider_->AdmitTurn(
                 operation->session.session_id,
                 operation->session.tenant_id,
@@ -1566,6 +1658,7 @@ void PersonaRuntime::FinishAsyncCompletedChat(
         commit.turn.tone = value.response.user_emotion.tone;
         commit.turn.response = value.response.response;
         commit.turn.context_id = operation->context_id;
+        commit.turn.turn_id = operation->turn_id;
         commit.turn.persona_id = operation->persona_id;
         commit.turn.valence = value.emotion_state.state().valence;
         commit.turn.arousal = value.emotion_state.state().arousal;

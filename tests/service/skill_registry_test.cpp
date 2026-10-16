@@ -3,6 +3,7 @@
 #include "../../src/service/persona/stateful_skill_registry.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <future>
 
@@ -228,6 +229,41 @@ TEST(SkillToolCallCoordinatorTest, ExecutesStandardToolCallAndBuildsToolResult) 
     EXPECT_EQ(result.value()[0].content, R"({"value":42})");
 }
 
+TEST(SkillToolCallCoordinatorTest, RejectsToolOutsideTurnAllowlistWithoutExecutingIt) {
+    class CountingExecutor final : public agent::skill::ISkillExecutor {
+    public:
+        core::Result<agent::service::persona::SkillSessionSnapshot> Start(
+            const agent::skill::SkillExecutionRequest&,
+            agent::skill::SkillExecutionCallbacks) override {
+            ++calls;
+            return agent::service::persona::SkillSessionSnapshot{};
+        }
+        core::Status Cancel(std::string_view) override { return core::Status::Ok(); }
+        int calls = 0;
+    };
+    auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
+    auto manifest = MakeManifest();
+    ASSERT_TRUE(registry->Register(manifest).ok());
+    auto executor = std::make_shared<CountingExecutor>();
+    auto factory = std::make_shared<agent::skill::InMemorySkillExecutorFactory>();
+    ASSERT_TRUE(factory->RegisterReference("native", manifest.skill_id, executor).ok());
+    auto sessions = std::make_shared<agent::service::persona::SkillSessionManager>();
+    auto invocation = std::make_shared<agent::skill::SkillInvocationService>(registry, factory, sessions);
+    agent::skill::SkillToolCallCoordinator coordinator(registry, invocation);
+    agent::llm::ChatCompletionResponse response;
+    response.tool_calls.push_back({"call-1", registry->Require(manifest.skill_id).value().tool_name,
+                                   R"({"reason":"look"})"});
+    agent::skill::SkillToolCallContext context{
+        "session-allowlist", "user", "persona", "trace", std::chrono::seconds(1),
+        std::vector<std::string>{"some_other_tool"}};
+    auto result = coordinator.Execute(response, context);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    ASSERT_EQ(result.value().size(), 1u);
+    EXPECT_EQ(nlohmann::json::parse(result.value().front().content)["error"]["code"],
+              static_cast<int>(core::ErrorCode::PermissionDenied));
+    EXPECT_EQ(executor->calls, 0);
+}
+
 TEST(SkillToolCallCoordinatorTest, CompletesTwoRoundToolCallingProtocol) {
     class ImmediateExecutor final : public agent::skill::ISkillExecutor {
     public:
@@ -355,4 +391,133 @@ TEST(SkillToolCallCoordinatorTest, ExecutesAsyncWithoutBlockingUntilExecutorComp
     EXPECT_EQ(result.value()[0].content, R"({"async":true})");
 }
 
-} // namespace
+// 同步/异步使用同一业务替身，验证授权、输出 schema 与来源门禁的公共契约。
+class ContractInvocation final : public agent::skill::ISkillInvocationService {
+public:
+    core::Result<agent::service::persona::SkillSessionSnapshot> Invoke(
+        agent::skill::SkillExecutionRequest request, agent::skill::SkillExecutionCallbacks callbacks) override {
+        ++calls;
+        if (deferred) {
+            pending = std::move(callbacks.on_result);
+        } else {
+            result.call_id = spoof_identity ? "wrong-call" : request.call.call_id;
+            callbacks.on_result(result);
+        }
+        agent::service::persona::SkillSessionSnapshot snapshot;
+        snapshot.execution_id = request.call.call_id;
+        return snapshot;
+    }
+    core::Status Cancel(std::string_view) override {
+        ++cancels;
+        if (pending) {
+            auto completed = std::move(pending);
+            auto cancelled = result;
+            cancelled.status = core::Status::Error(core::ErrorCode::Cancelled, "cancelled");
+            completed(std::move(cancelled));
+        }
+        return core::Status::Ok();
+    }
+    agent::skill::SkillResult result;
+    std::function<void(agent::skill::SkillResult)> pending;
+    int calls = 0;
+    int cancels = 0;
+    bool deferred = false;
+    bool spoof_identity = false;
+};
+
+class ContractPolicy final : public agent::skill::ISkillToolPolicy {
+public:
+    core::Status Authorize(const agent::skill::SkillToolCallContext& context,
+        const agent::skill::SkillCall&, const agent::skill::SkillManifest& manifest) const override {
+        EXPECT_EQ(context.user_uuid, "trusted-user");
+        EXPECT_EQ(manifest.version, "1.0.0");
+        return authorize;
+    }
+    core::Status ValidateResult(const agent::skill::SkillToolCallContext&,
+        const agent::skill::SkillCall&, const agent::skill::SkillManifest&,
+        const agent::skill::SkillResult&) const override { return validate; }
+    core::Status authorize = core::Status::Ok();
+    core::Status validate = core::Status::Ok();
+};
+
+class SkillCoordinatorContractTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(SkillCoordinatorContractTest, SharesAuthorizationAndResultValidationAcrossExecutionPaths) {
+    auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
+    auto manifest = MakeManifest();
+    manifest.output_schema_json = R"({"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false})";
+    ASSERT_TRUE(registry->Register(manifest).ok());
+    auto invocation = std::make_shared<ContractInvocation>();
+    auto policy = std::make_shared<ContractPolicy>();
+    agent::skill::SkillToolCallCoordinator coordinator(registry, invocation);
+    agent::llm::ChatCompletionResponse response;
+    response.tool_calls = {{"contract-call", "vision_observe", R"({"reason":"look"})"}};
+    agent::skill::SkillToolCallContext context;
+    context.user_uuid = "trusted-user";
+    context.allowed_tool_names = std::vector<std::string>{"vision_observe"};
+    context.policy = policy;
+    const auto execute = [&] {
+        if (!GetParam()) return coordinator.Execute(response, context);
+        std::promise<core::Result<std::vector<agent::llm::ChatMessage>>> promise;
+        auto future = promise.get_future();
+        auto status = coordinator.ExecuteAsync(response, context, [&promise](auto result) {
+            promise.set_value(std::move(result));
+        });
+        if (!status.ok()) return core::Result<std::vector<agent::llm::ChatMessage>>(status);
+        return future.get();
+    };
+    const auto error = [&] {
+        auto result = execute();
+        EXPECT_TRUE(result.ok());
+        return nlohmann::json::parse(result.value().front().content)["error"]["code"].get<int>();
+    };
+    invocation->result.result_json = R"({"value":42})";
+    context.allowed_tool_names = std::vector<std::string>{};
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::PermissionDenied));
+    EXPECT_EQ(invocation->calls, 0);
+    context.allowed_tool_names = std::vector<std::string>{"vision_observe"};
+    policy->authorize = core::Status::Error(core::ErrorCode::PermissionDenied, "business denial");
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::PermissionDenied));
+    EXPECT_EQ(invocation->calls, 0);
+    policy->authorize = core::Status::Ok();
+    invocation->result.result_json = R"({"value":"wrong"})";
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::InvalidArgument));
+    invocation->result.result_json = R"({"value":42})";
+    policy->validate = core::Status::Error(core::ErrorCode::DataLoss, "source version rejected");
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::DataLoss));
+    policy->validate = core::Status::Ok();
+    invocation->spoof_identity = true;
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::DataLoss));
+    invocation->spoof_identity = false;
+    context.max_result_bytes = 8;
+    EXPECT_EQ(error(), static_cast<int>(core::ErrorCode::ResourceExhausted));
+    context.max_result_bytes = 65536;
+    context.result_format = agent::skill::ToolResultFormat::EnvelopeV1;
+    auto result = execute();
+    ASSERT_TRUE(result.ok());
+    const auto body = nlohmann::json::parse(result.value().front().content);
+    EXPECT_EQ(body["status"], "success");
+    EXPECT_EQ(body["call_id"], "contract-call");
+    EXPECT_EQ(body["result"]["value"], 42);
+}
+
+INSTANTIATE_TEST_SUITE_P(SyncAndAsync, SkillCoordinatorContractTest, ::testing::Bool());
+
+TEST(SkillToolCallCoordinatorTest, TimeoutCancellationCanCompleteSynchronouslyWithoutDeadlock) {
+    auto registry = std::make_shared<agent::skill::InMemorySkillRegistry>();
+    ASSERT_TRUE(registry->Register(MakeManifest()).ok());
+    auto invocation = std::make_shared<ContractInvocation>();
+    invocation->deferred = true;
+    agent::skill::SkillToolCallCoordinator coordinator(registry, invocation);
+    agent::llm::ChatCompletionResponse response;
+    response.tool_calls = {{"timeout-reentrant", "vision_observe", R"({"reason":"wait"})"}};
+    agent::skill::SkillToolCallContext context;
+    context.timeout = std::chrono::milliseconds(1);
+    auto result = coordinator.Execute(response, context);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(invocation->cancels, 1);
+    EXPECT_EQ(nlohmann::json::parse(result.value().front().content)["error"]["code"],
+              static_cast<int>(core::ErrorCode::Timeout));
+}
+
+}

@@ -49,6 +49,8 @@ struct ConversationTurn {
     std::string persona_id;
     std::optional<double> valence;
     std::optional<double> arousal;
+    // 稳定回合标识，用于 L0 与近期历史跨来源去重；旧持久化记录可为空并回退到内容匹配。
+    std::string turn_id;
 };
 
 struct SessionOptions {

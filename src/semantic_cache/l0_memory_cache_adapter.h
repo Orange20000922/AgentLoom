@@ -29,7 +29,16 @@ struct L0MemoryCacheAdapterOptions {
     std::int64_t warm_window_seconds = 3600;
     std::int64_t half_life_seconds = 172800;
     std::int64_t max_age_seconds = 604800;
+    // Adapter 内部防止单次 L0 payload 造成无界内存/传输占用，单位为字节。
+    std::size_t max_payload_bytes = 64 * 1024;
 };
+
+// 无 I/O 的召回装配：复用实际 adapter 的隔离、去重和预算规则，便于确定性验证。
+core::Result<CacheLookupResult> BuildL0RecallContext(
+    const CacheLookupRequest& request,
+    std::vector<cache_vector::SearchWithContextResult> hits,
+    const L0MemoryCacheAdapterOptions& options,
+    std::int64_t now_ms);
 
 /// L0 short-context memory adapter.
 ///
