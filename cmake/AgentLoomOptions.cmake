@@ -49,11 +49,16 @@ function(copy_runtime_files target)
     endforeach()
 endfunction()
 
+include("${CMAKE_CURRENT_LIST_DIR}/AgentLoomWholeArchive.cmake")
+
 function(link_whole_archive target library)
-    if(MSVC)
-        target_link_options(${target} PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${library}>")
+    # 源码构建和安装包 consumer 共用一个实现，避免平台分支逐渐分叉。
+    if(TARGET "${library}")
+        agentloom_link_whole_archive("${target}" "${library}")
     else()
-        target_link_libraries(${target} PRIVATE
-            "-Wl,--whole-archive" ${library} "-Wl,--no-whole-archive")
+        # Foundation 中的工具会提前引用稍后定义的 agent_config。等当前目录
+        # 配置完毕再验证/应用 helper；EVAL 将当前实参固定，避免函数返回后丢失。
+        cmake_language(EVAL CODE
+            "cmake_language(DEFER CALL agentloom_link_whole_archive [[${target}]] [[${library}]])")
     endif()
 endfunction()

@@ -76,6 +76,9 @@ jobs:
       - name: Test streaming benchmark parser
         run: python tests/tools/gateway_stream_benchmark_test.py
 
+      - name: Test whole archive link helper
+        run: python tests/tools/whole_archive_cmake_test.py
+
       - name: Report runner resources
         shell: bash
         run: |
