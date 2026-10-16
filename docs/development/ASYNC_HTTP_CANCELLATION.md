@@ -30,4 +30,4 @@
 http_client_tests --gtest_filter=*AsyncBeastHttpCancellationTest.*:AsyncBeastHttpClientTest.ShutdownCancelsInflightAndWaitsForCallback --gtest_repeat=100 --gtest_break_on_failure
 ```
 
-在 Linux 上同时运行 Release 重复测试和 ASan/UBSan 检查：消毒器会改变调度，不能用消毒器未复现来替代 Release 验证。完整 SDK 与应用集成结果仍以对应 CI 为准。
+在 Linux 上同时运行 Release 重复测试和 ASan/UBSan 检查：运行时错误检测工具会改变调度，不能用这些工具未复现来替代 Release 验证。完整 SDK 与应用集成结果仍以对应 CI 为准。
