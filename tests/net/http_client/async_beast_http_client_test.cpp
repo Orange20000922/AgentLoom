@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -188,9 +189,12 @@ std::string Url(std::uint16_t port, std::string_view target = "/") {
     return "http://127.0.0.1:" + std::to_string(port) + std::string(target);
 }
 
-std::unique_ptr<AsyncBeastHttpClient> CreateClient(std::size_t thread_count = 1) {
+std::unique_ptr<AsyncBeastHttpClient> CreateClient(
+    std::size_t thread_count = 1,
+    std::shared_ptr<agent::net::TlsContext> tls_context = {}) {
     AsyncBeastHttpClientOptions options;
     options.io_thread_count = thread_count;
+    options.tls_context = std::move(tls_context);
     auto result = AsyncBeastHttpClient::Create(std::move(options));
     EXPECT_TRUE(result.ok()) << result.status().message();
     return result.ok() ? std::move(result).value() : nullptr;
@@ -427,6 +431,156 @@ TEST(AsyncBeastHttpClientTest, ShutdownCancelsInflightAndWaitsForCallback) {
     EXPECT_FALSE(rejected.ok());
     EXPECT_EQ(rejected.status().code(), core::ErrorCode::Cancelled);
 }
+
+namespace {
+
+// 只接收首字节而不回包：分别稳定停在 HTTP read 和 TLS handshake，
+// 不依赖外网、证书或固定端口，也不在生产代码中注入测试调度接口。
+class PendingTransportServer {
+public:
+    PendingTransportServer()
+        : acceptor_(io_context_, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)),
+          port_(acceptor_.local_endpoint().port()) {
+        Accept();
+        thread_ = std::thread([this] { io_context_.run(); });
+    }
+
+    ~PendingTransportServer() {
+        io_context_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    std::uint16_t port() const noexcept { return port_; }
+    std::size_t started_requests() const noexcept {
+        return started_requests_.load(std::memory_order_acquire);
+    }
+
+private:
+    struct Session {
+        explicit Session(tcp::socket incoming) : socket(std::move(incoming)) {}
+        tcp::socket socket;
+        std::array<char, 1> first_byte{};
+    };
+
+    void Accept() {
+        acceptor_.async_accept([this](const beast::error_code& error, tcp::socket socket) {
+            if (error) {
+                return;
+            }
+            auto session = std::make_shared<Session>(std::move(socket));
+            sessions_.push_back(session);
+            session->socket.async_read_some(asio::buffer(session->first_byte),
+                [this, session](const beast::error_code& read_error, std::size_t bytes) {
+                    if (!read_error && bytes != 0) {
+                        started_requests_.fetch_add(1, std::memory_order_release);
+                    }
+                });
+            Accept();
+        });
+    }
+
+    asio::io_context io_context_;
+    tcp::acceptor acceptor_;
+    std::uint16_t port_;
+    std::vector<std::shared_ptr<Session>> sessions_;
+    std::atomic<std::size_t> started_requests_{0};
+    std::thread thread_;
+};
+
+class AsyncBeastHttpCancellationTest : public ::testing::TestWithParam<bool> {
+protected:
+    void SetUp() override {
+        if (GetParam()) {
+            agent::net::TlsClientOptions options;
+            options.verify_mode = agent::net::TlsVerifyMode::None;
+            auto created = agent::net::TlsContext::CreateClient(options);
+            ASSERT_TRUE(created.ok()) << created.status().message();
+            tls_context_ = std::move(created).value();
+        }
+    }
+
+    std::string RequestUrl(std::uint16_t port) const {
+        return std::string(GetParam() ? "https://127.0.0.1:" : "http://127.0.0.1:") +
+            std::to_string(port) + "/pending";
+    }
+
+    std::shared_ptr<agent::net::TlsContext> tls_context_;
+};
+
+}
+
+TEST_P(AsyncBeastHttpCancellationTest, RepeatedImmediateShutdownCompletesExactlyOnce) {
+    PendingTransportServer server;
+    // 多个 IO 线程反复交错 DNS 完成与取消，覆盖已排队的成功回调晚于 Finish 的窗口。
+    constexpr std::size_t request_count = 4;
+    for (int round = 0; round < 64; ++round) {
+        SCOPED_TRACE(round);
+        std::array<std::atomic<int>, request_count> callbacks{};
+        auto client = CreateClient(4, tls_context_);
+        ASSERT_NE(client, nullptr);
+        for (std::size_t index = 0; index < request_count; ++index) {
+            HttpClientRequest request;
+            request.url = RequestUrl(server.port());
+            auto submitted = client->ExecuteAsync(std::move(request), [&, index](auto result) {
+                ++callbacks[index];
+                EXPECT_FALSE(result.ok());
+                EXPECT_EQ(result.status().code(), core::ErrorCode::Cancelled);
+            });
+            ASSERT_TRUE(submitted.ok()) << submitted.status().message();
+        }
+        client->Shutdown();
+        for (const auto& count : callbacks) {
+            EXPECT_EQ(count.load(), 1);
+        }
+    }
+}
+
+TEST_P(AsyncBeastHttpCancellationTest, PendingTransportSurvivesCancelTimeoutAndShutdown) {
+    PendingTransportServer server;
+    for (int mode = 0; mode < 3; ++mode) {
+        SCOPED_TRACE(mode);
+        std::atomic<int> callbacks{0};
+        std::promise<core::Status> completion;
+        auto future = completion.get_future();
+        auto client = CreateClient(4, tls_context_);
+        ASSERT_NE(client, nullptr);
+        HttpClientRequest request;
+        request.url = RequestUrl(server.port());
+        request.timeout_ms = mode == 1 ? 500 : 3000;
+        auto submitted = client->ExecuteAsync(std::move(request), [&](auto result) {
+            if (callbacks.fetch_add(1) == 0) {
+                completion.set_value(result.ok() ? core::Status::Ok() : result.status());
+            }
+        });
+        ASSERT_TRUE(submitted.ok()) << submitted.status().message();
+        auto operation = std::move(submitted).value();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (server.started_requests() <= static_cast<std::size_t>(mode) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ASSERT_GT(server.started_requests(), static_cast<std::size_t>(mode));
+        if (mode == 0) {
+            operation->Cancel();
+            operation->Cancel();
+        } else if (mode == 2) {
+            client->Shutdown();
+        }
+        // 不靠调用方持有句柄延长 operation/stream 生命周期；Shutdown 排空全部 IO 回调。
+        operation.reset();
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        EXPECT_EQ(future.get().code(), mode == 1
+            ? core::ErrorCode::Timeout : core::ErrorCode::Cancelled);
+        client->Shutdown();
+        EXPECT_EQ(callbacks.load(), 1);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(PlainAndTls, AsyncBeastHttpCancellationTest,
+    ::testing::Values(false, true),
+    [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Tls" : "Plain"; });
 
 TEST(AsyncBeastHttpClientTest, HttpErrorStatusIsSuccessfulTransportResult) {
     auto server = AsyncMockHttpServer::Start(std::chrono::milliseconds(0));
