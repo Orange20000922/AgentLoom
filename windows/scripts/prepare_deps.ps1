@@ -175,8 +175,16 @@ function Ensure-PythonEnvironment {
         }
     }
 
-    & $PythonExe -c "import zstandard" 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    # 新 venv 缺包属于正常探测结果；PowerShell 5.1 会将 stderr 提升为终止错误。
+    $hasZstandard = $false
+    try {
+        & $PythonExe -c "import zstandard" 2>$null
+        $hasZstandard = ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        $hasZstandard = $false
+    }
+    if (-not $hasZstandard) {
         Write-Log "Installing zstandard into the private Python environment"
         & $PythonExe -m pip install --disable-pip-version-check "zstandard>=0.22,<1"
         if ($LASTEXITCODE -ne 0) {
