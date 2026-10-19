@@ -619,7 +619,16 @@ TEST(SqliteAsyncExecutorTest, HandlesMixedReadWriteStressWithCpuWork) {
     ASSERT_TRUE(final_count.ok()) << final_count.status().message();
     EXPECT_EQ(std::move(final_count).value(), kWrites);
 
+    // future completion is published just before the worker releases its RAII lease.
+    // Wait for that cleanup instead of racing the worker at the final pool snapshot.
+    const auto idle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     auto stats = executor.pool().Stats();
+    while ((stats.idle_read_connections != stats.total_read_connections ||
+            stats.idle_write_connections != stats.total_write_connections) &&
+           std::chrono::steady_clock::now() < idle_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        stats = executor.pool().Stats();
+    }
     EXPECT_EQ(stats.idle_read_connections, stats.total_read_connections);
     EXPECT_EQ(stats.idle_write_connections, stats.total_write_connections);
     EXPECT_EQ(stats.leased_read_connections, 0u);
