@@ -52,7 +52,8 @@ jobs:
       FAISS_SHA256: D42FF92B45F8D202C8FA205815690D876C26AF22295546E31F8253EB77C369FA
       FAISS_ARCHIVE: deps/libfaiss-1.14.1-py3.12_h2e52968_0_cpu.conda
       FAISS_ROOT: deps/faiss-1.14.1-cpu-win64
-      MKL_URL: https://repo.anaconda.com/pkgs/main/win-64/mkl-2023.1.0-h6b88ed4_46358.conda
+      # 与本地准备脚本使用同一官方 channel 和归档哈希，避免旧 repo 地址返回 403。
+      MKL_URL: https://conda.anaconda.org/anaconda/win-64/mkl-2023.1.0-h6b88ed4_46358.conda
       MKL_SHA256: 2B06DA1AE1ED81D9A798395604C7653365E2B197A078FDE6FD47DC6218B730BB
       MKL_ARCHIVE: deps/mkl-2023.1.0-h6b88ed4_46358.conda
       MKL_ROOT: deps/mkl-2023.1.0-win64
