@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <random>
+#include <thread>
+#include <atomic>
 
 using namespace agent;
 using namespace agent::vector;
@@ -328,4 +330,24 @@ TEST_F(VectorIndexManagerTest, PostFilterExcludesForgotten) {
     auto results = std::move(results_r).value();
     EXPECT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].memory_hash, "h2");
+}
+
+TEST_F(VectorIndexManagerTest, ConcurrentSearchAndEvictionRetainSearchOwnership) {
+    auto partition = CreatePartition("L3");
+    const std::vector<float> query(kDim, 0.25f);
+    InsertEntry(partition, query, "stable");
+    IndexManagerOptions options;
+    options.backend = "exact";
+    options.max_resident_partitions = 1;
+    VectorIndexManager manager(repo_, registry_, kDim, options);
+    std::atomic<int> failures{0};
+    std::jthread search([&] {
+        for (int i = 0; i < 300; ++i) {
+            auto result = manager.Search(partition, query, {});
+            if (!result.ok() || result.value().size() != 1) ++failures;
+        }
+    });
+    for (int i = 0; i < 300; ++i) manager.Evict(partition);
+    search.join();
+    EXPECT_EQ(failures, 0);
 }

@@ -1221,3 +1221,14 @@ TEST(ConfigPersonaGatewaySectionTest, RejectsZeroActiveSessionLimit) {
         }),
         std::runtime_error);
 }
+
+TEST(ConfigPersonaGatewaySectionTest, LoadsPerSourceBudgetsAndRejectsZeroLimit) {
+    ScopedTempDirectory tmp("context_budgets");
+    const auto path = tmp.path() / "config.json";
+    WriteFile(path, R"({"persona_gateway":{"context_budgets":{"l3":{"max_bytes":4096,"allow_drop_optional":true}}}})");
+    auto options = Parse({"server", "--llm", "llm.gguf", "--config", path.string()});
+    EXPECT_EQ(options.persona_gateway.runtime_context_budgets[1].max_bytes, 4096u);
+    EXPECT_TRUE(options.persona_gateway.runtime_context_budgets[1].allow_drop_optional);
+    WriteFile(path, R"({"persona_gateway":{"context_budgets":{"l3":{"max_bytes":0}}}})");
+    EXPECT_THROW(Parse({"server", "--llm", "llm.gguf", "--config", path.string()}), std::runtime_error);
+}

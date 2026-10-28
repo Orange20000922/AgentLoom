@@ -41,6 +41,12 @@ core::ThreadPoolOptions WithDefaultPoolName(core::ThreadPoolOptions options, std
     return options;
 }
 
+persona::PersonaRuntimeOptions ResolveRuntimeOptions(persona::PersonaRuntimeOptions options,
+    const PersonaGatewayServerDependencies& dependencies) {
+    if (!options.skill_registry) options.skill_registry = dependencies.skill_registry;
+    return options;
+}
+
 core::ThreadPoolOptions ResolvePoolOptions(
     core::ThreadPoolOptions options,
     const GatewayThreadPoolConcurrencyOptions& concurrency,
@@ -183,7 +189,7 @@ PersonaGatewayServer::PersonaGatewayServer(PersonaGatewayServerOptions options,
                dependencies_.memory_provider,
                dependencies_.emotion_analyzer,
                dependencies_.llm_client,
-               options_.runtime,
+               ResolveRuntimeOptions(options_.runtime, dependencies_),
                nullptr,
                dependencies_.tool_memory_provider,
                dependencies_.skill_session_manager,
@@ -234,6 +240,14 @@ PersonaGatewayServer::PersonaGatewayServer(PersonaGatewayServerOptions options,
       http_server_(ResolveHttpOptions(options_)),
       maintenance_(core::LoggerAdapter::ForModule("gateway")),
       lifecycle_(core::LoggerAdapter::ForModule("gateway")) {
+    runtime_.ConfigureSkillDeadlineScheduler(agent::skill::MakeSkillDeadlineScheduler(
+        http_server_.executor(), io_pool_));
+    if (auto memory = std::dynamic_pointer_cast<persona::SemanticMemoryContextProvider>(dependencies_.memory_provider)) {
+        memory->ConfigureBlockingPool(io_pool_);
+    }
+    if (dependencies_.tool_memory_provider) {
+        lifecycle_configuration_status_ = dependencies_.tool_memory_provider->ConfigureAsync(compute_pool_, io_pool_);
+    }
     if (dependencies_.l0_memory_adapter) {
         auto l0 = dependencies_.l0_memory_adapter;
         sessions_.SetSessionClosedCallback([l0 = std::move(l0)](const persona::SessionSnapshot& snapshot) {
@@ -382,6 +396,15 @@ core::Status PersonaGatewayServer::ConfigureLifecycle() {
         if (!status.ok()) {
             return status;
         }
+    }
+    if (dependencies_.tool_memory_provider) {
+        status = register_component("tool-memory-async",
+            [this] { return dependencies_.tool_memory_provider->StartAsync(); },
+            [this](std::chrono::steady_clock::time_point) {
+                dependencies_.tool_memory_provider->ShutdownAsync();
+                return core::Status::Ok();
+            });
+        if (!status.ok()) return status;
     }
     status = register_component(
         "llm-pool",

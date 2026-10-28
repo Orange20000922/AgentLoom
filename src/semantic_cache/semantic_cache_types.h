@@ -49,6 +49,10 @@ struct CacheLookupRequest {
     std::unordered_map<std::string, std::string> extra;
 };
 
+struct MemoryRecallRecord {
+    std::string record_id;
+    std::string content;
+};
 struct CacheLookupResult {
     bool hit = false;
     std::int64_t entry_id = 0;
@@ -56,6 +60,7 @@ struct CacheLookupResult {
     std::string payload;
     std::string source_entry_fingerprint;
     std::chrono::system_clock::time_point retrieved_at{};
+    std::vector<MemoryRecallRecord> memory_records;
 };
 
 struct CacheStoreRequest {

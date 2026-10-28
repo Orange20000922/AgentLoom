@@ -23,6 +23,7 @@ public:
     virtual core::Result<SkillManifest> Require(
         std::string_view skill_id, std::string_view version = {}) const = 0;
     virtual core::Result<SkillManifest> RequireByToolName(std::string_view tool_name) const = 0;
+    virtual core::Result<std::vector<SkillManifest>> List() const = 0;
 };
 
 class InMemorySkillRegistry final : public ISkillRegistry {
@@ -35,6 +36,7 @@ public:
     core::Result<SkillManifest> Require(
         std::string_view skill_id, std::string_view version = {}) const override;
     core::Result<SkillManifest> RequireByToolName(std::string_view tool_name) const override;
+    core::Result<std::vector<SkillManifest>> List() const override;
 
 private:
     static std::string Key(std::string_view skill_id, std::string_view version);

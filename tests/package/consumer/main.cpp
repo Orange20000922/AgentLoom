@@ -10,6 +10,7 @@
 #include <AgentLoom/llm/llm_protocol.h>
 #include <AgentLoom/llm/openai_llm_client.h>
 #include <AgentLoom/skill/skill_executor.h>
+#include <AgentLoom/skill/skill_turn_plan.h>
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -127,6 +128,14 @@ int main() {
     if (skill_message.content.find("agentloom.tool-result.v1") == std::string::npos ||
         skill_message.content.find("sdk-v1") == std::string::npos ||
         !agent::skill::ValidateSkillJsonSchema(R"({"type":"integer"})", "1").ok()) return 13;
+
+    // 实际链接新增规范计划与预算编译接口，验证安装包公开头和符号完整。
+    agent::skill::InMemorySkillRegistry turn_registry;
+    auto empty_plan = agent::skill::BuildSkillTurnPlan(turn_registry, {}, {}, "query");
+    if (!empty_plan.ok()) return 14;
+    agent::service::persona::ContextBudgetReport report;
+    auto context = agent::service::persona::CompileContext({}, {}, report);
+    if (!context.ok()) return 15;
 
     core::BucketMemoryPool pool;
     auto block = pool.allocate(256);

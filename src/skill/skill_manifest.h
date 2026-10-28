@@ -21,6 +21,9 @@ enum class ExecutionMode {
     StreamWindowed,
 };
 
+enum class ToolExposure { Recall, Always };
+enum class ToolExecution { Model, Prefetch };
+
 struct SkillManifest {
     std::string skill_id;
     // OpenAI-compatible function name；与可含点号的 skill_id 分离。
@@ -43,6 +46,10 @@ struct SkillManifest {
     std::size_t max_parallel_per_session = 1;
     bool requires_confirmation = false;
     SkillExecutorSpec executor;
+    ToolExposure exposure = ToolExposure::Recall;
+    ToolExecution execution = ToolExecution::Model;
+    // 只读是预取的必要条件，仍须可信参数绑定、schema 和消费者授权。
+    bool read_only = false;
 };
 
 core::Status ValidateManifest(const SkillManifest& manifest);

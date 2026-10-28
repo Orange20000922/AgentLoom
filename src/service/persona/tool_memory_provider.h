@@ -35,6 +35,7 @@ struct ToolMemoryHit {
     int priority = 0;
     bool regex_hit = false;
     bool vector_hit = false;
+    std::string skill_version;
 };
 
 struct ToolMemoryContext {
@@ -42,6 +43,7 @@ struct ToolMemoryContext {
     std::vector<ToolMemoryHit> hits;
     std::string prompt_block;
     std::vector<llm::ChatCompletionRequest::Tool> tools;
+    std::vector<std::string> degraded_reasons;
 };
 
 class IToolMemoryProvider {
@@ -54,6 +56,9 @@ public:
     virtual core::Result<ToolMemoryContext> Query(const ToolMemoryQuery& request) = 0;
     /// 异步查询工具记忆；默认兼容实现会同步调用 Query，生产 Vector provider 可使用批处理器。
     virtual core::Status QueryAsync(ToolMemoryQuery request, QueryCompletion completion);
+    virtual core::Status ConfigureAsync(core::ThreadPool&, core::ThreadPool&) { return core::Status::Ok(); }
+    virtual core::Status StartAsync() { return core::Status::Ok(); }
+    virtual void ShutdownAsync() noexcept {}
 };
 
 // 工具关键词触发器：由工具配置的关键词编译成正则，作为向量召回的确定性兜底通道。
@@ -85,6 +90,9 @@ public:
 
     core::Result<ToolMemoryContext> Query(const ToolMemoryQuery& request) override;
     core::Status QueryAsync(ToolMemoryQuery request, QueryCompletion completion) override;
+    core::Status ConfigureAsync(core::ThreadPool& compute, core::ThreadPool& io) override;
+    core::Status StartAsync() override;
+    void ShutdownAsync() noexcept override;
 
 private:
     struct CompiledKeywordTrigger {

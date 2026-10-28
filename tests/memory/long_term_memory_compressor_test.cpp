@@ -116,24 +116,6 @@ TEST_F(LongTermMemoryCompressorTest, CreateWithValidDeps) {
     EXPECT_NE(compressor, nullptr);
 }
 
-TEST(LongTermMemoryCompressorCodecTest, RejectsUnstructuredOrOversizedOutput) {
-    auto object = ParseL3CompressionFacts(R"({"fact":"not-an-array"})", 4, 64);
-    EXPECT_FALSE(object.ok());
-    EXPECT_EQ(object.status().code(), core::ErrorCode::InvalidArgument);
-
-    auto non_string = ParseL3CompressionFacts(R"(["ok", 1])", 4, 64);
-    EXPECT_FALSE(non_string.ok());
-    EXPECT_EQ(non_string.status().code(), core::ErrorCode::InvalidArgument);
-
-    auto too_many = ParseL3CompressionFacts(R"(["a","b","c"])", 2, 64);
-    EXPECT_FALSE(too_many.ok());
-    EXPECT_EQ(too_many.status().code(), core::ErrorCode::ResourceExhausted);
-
-    auto too_large = ParseL3CompressionFacts(R"(["12345"])", 4, 4);
-    EXPECT_FALSE(too_large.ok());
-    EXPECT_EQ(too_large.status().code(), core::ErrorCode::InvalidArgument);
-}
-
 TEST_F(LongTermMemoryCompressorTest, RedisL0SourceReadsV2RecordsByCompleteOwnerAndDate) {
     const auto owner = Owner("source-user", "source-tenant");
     const auto other = Owner("source-user", "other-tenant");

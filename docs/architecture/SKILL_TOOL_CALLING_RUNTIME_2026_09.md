@@ -10,6 +10,9 @@
 当前契约见 [Skill 工具契约与可信 Turn 输入](../runtime/SKILL_TOOL_CONTRACTS.md)。
 该文同时列出 #18 尚未完成的异步 deadline、记忆数据边界和分来源预算，优先于本文早期描述。
 
+2026-10-29：工具暴露、只读预取、必调终态、deadline 和来源预算的新契约见
+[记忆上下文、必需工具与确定性预取](../runtime/MEMORY_TOOL_RUNTIME.md)。本文早期测试统计和缺陷清单保留为历史记录。
+
 ## 1. 实现现状
 
 `src/skill/` 是一层独立的 **LLM 工具调用协议运行时**，把「工具声明 → 调用解析 → 执行 → 结果回填」这一 OpenAI-compatible function-calling 协议独立成模块，与既有的 Skill Session 生命周期（`skill_session_manager`，面向媒体/视觉长任务）解耦。

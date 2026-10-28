@@ -1,6 +1,7 @@
 #pragma once
 
 #include "skill_prompt_compiler.h"
+#include "skill_deadline.h"
 #include "../service/persona/skill_session_manager.h"
 
 #include <functional>
@@ -11,6 +12,8 @@
 #include <condition_variable>
 #include <chrono>
 #include <optional>
+#include <stop_token>
+#include <atomic>
 
 namespace agent::skill {
 
@@ -20,6 +23,8 @@ struct SkillExecutionRequest {
     std::string user_uuid;
     std::string persona_id;
     std::string trace_id;
+    // executor 以此标识 Cancel 的资源；模型 call_id 只用于协议关联，不能作全局资源 ID。
+    std::string execution_id;
 };
 
 struct SkillExecutionCallbacks {
@@ -83,10 +88,20 @@ private:
     std::shared_ptr<const ISkillExecutorFactory> factory_;
     std::shared_ptr<service::persona::ISkillSessionManager> sessions_;
     mutable std::mutex active_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<ISkillExecutor>> active_executions_;
+    struct ActiveExecution {
+        std::shared_ptr<ISkillExecutor> executor;
+        std::function<void(SkillResult)> complete;
+        std::shared_ptr<std::atomic<bool>> cancelled;
+    };
+    std::unordered_map<std::string, ActiveExecution> active_executions_;
 };
 
 class ISkillToolPolicy;
+
+struct SkillToolRequirement {
+    std::string skill_id;
+    std::string version;
+};
 
 struct SkillToolCallContext {
     std::string session_id;
@@ -99,6 +114,10 @@ struct SkillToolCallContext {
     std::size_t max_result_bytes = 64 * 1024;
     ToolResultFormat result_format = ToolResultFormat::LegacyInline;
     std::shared_ptr<const ISkillToolPolicy> policy;
+    // 总工具阶段 deadline 与取消；同一 Turn 的预取和模型工具调用共享可信控制。
+    std::shared_ptr<ISkillDeadlineScheduler> deadline_scheduler;
+    std::stop_token cancellation;
+    std::vector<std::string> required_tool_names;
 };
 
 // 业务身份、审批发布、来源版本和引用由消费者校验；此接口不拥有 Session 或调度资源。
@@ -111,6 +130,17 @@ public:
     virtual core::Status ValidateResult(
         const SkillToolCallContext& context, const SkillCall& call,
         const SkillManifest& manifest, const SkillResult& result) const = 0;
+    // 声明资格与具体调用授权分开；不替代执行时基于真实参数的 Authorize。
+    virtual core::Status AuthorizeDeclaration(const SkillToolCallContext&,
+        const SkillManifest&) const { return core::Status::Ok(); }
+    // 仅可信宿主实现可指定本轮必需工具；不从用户 JSON 或 LLM 文本提取策略。
+    virtual core::Result<std::vector<SkillToolRequirement>> RequiredTools(
+        const SkillToolCallContext&) const { return std::vector<SkillToolRequirement>{}; }
+    virtual core::Result<std::string> BindPrefetchArguments(
+        const SkillToolCallContext&, const SkillManifest&, std::string_view) const {
+        return core::Status::Error(core::ErrorCode::FailedPrecondition,
+                                   "prefetch requires a trusted argument binder");
+    }
 };
 
 class ISkillToolCallCoordinator {

@@ -354,6 +354,7 @@ core::Result<CacheLookupResult> BuildL0RecallContext(
     std::size_t accepted = 0;
     std::size_t payload_bytes = 0;
     std::unordered_set<std::string> included_records;
+    std::vector<MemoryRecallRecord> memory_records;
     for (const auto& ranked_hit : ranked) {
         const auto& hit = ranked_hit.hit;
         if (!included_records.insert(RecentTurnKey(hit.hit)).second) {
@@ -362,6 +363,8 @@ core::Result<CacheLookupResult> BuildL0RecallContext(
         if (accepted == 0) {
             best_score = ranked_hit.decayed_score;
         }
+        memory_records.push_back({RecentTurnKey(hit.hit),
+            "Q: " + hit.hit.input + "\nA: " + hit.hit.response});
         std::ostringstream entry;
         entry << "Score: " << ranked_hit.decayed_score << "\n"
                 << "RawScore: " << hit.score << "\n"
@@ -371,6 +374,8 @@ core::Result<CacheLookupResult> BuildL0RecallContext(
         for (const auto& neighbor : hit.context) {
             if ((!neighbor.input.empty() || !neighbor.response.empty()) &&
                 included_records.insert(RecentTurnKey(neighbor)).second) {
+                memory_records.push_back({RecentTurnKey(neighbor),
+                    "Q: " + neighbor.input + "\nA: " + neighbor.response});
                 entry << "Context Q: " << neighbor.input << "\n"
                         << "Context A: " << neighbor.response << "\n";
             }
@@ -393,6 +398,7 @@ core::Result<CacheLookupResult> BuildL0RecallContext(
     result.hit = accepted > 0;
     result.similarity_score = best_score;
     result.payload = serialized_payload;
+    result.memory_records = std::move(memory_records);
     result.retrieved_at = std::chrono::system_clock::now();
     return result;
 }

@@ -54,7 +54,8 @@ core::Result<service::persona::SkillSessionSnapshot> SkillInvocationService::Inv
     auto executor = factory_->Resolve(manifest.value());
     if (!executor.ok()) return executor.status();
     service::persona::SkillSessionStartRequest start;
-    start.execution_id = request.call.call_id;
+    static std::atomic<std::uint64_t> next_execution{1};
+    start.execution_id = "skill-execution-" + std::to_string(next_execution.fetch_add(1));
     start.skill_id = request.call.skill_id;
     start.session_id = request.session_id;
     start.user_uuid = request.user_uuid;
@@ -65,8 +66,11 @@ core::Result<service::persona::SkillSessionSnapshot> SkillInvocationService::Inv
     start.arguments_json = request.call.arguments_json;
     auto started = sessions_->Start(start);
     if (!started.ok()) return started.status();
+    request.execution_id = started.value().execution_id;
     auto on_result = std::move(callbacks.on_result);
     auto on_observation = std::move(callbacks.on_observation);
+    auto terminal = std::make_shared<std::atomic<bool>>(false);
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
     // 用 weak_ptr 捕获自身，避免回调持有裸 this：服务先于在途执行析构时不再产生悬垂引用。
     std::weak_ptr<SkillInvocationService> weak_self = weak_from_this();
     std::shared_ptr<service::persona::ISkillSessionManager> sessions = sessions_;
@@ -74,7 +78,9 @@ core::Result<service::persona::SkillSessionSnapshot> SkillInvocationService::Inv
                            session_id = request.session_id,
                            skill_id = request.call.skill_id,
                            trace_id = request.trace_id,
-                           on_result = std::move(on_result)](SkillResult result) mutable {
+                           terminal, cancelled, on_result = std::move(on_result)](SkillResult result) mutable {
+        if (terminal->exchange(true)) return;
+        if (cancelled->load()) result.status = core::Status::Error(core::ErrorCode::Cancelled, "skill invocation cancelled");
         if (auto self = weak_self.lock()) {
             std::lock_guard lock(self->active_mutex_);
             self->active_executions_.erase(execution_id);
@@ -93,8 +99,13 @@ core::Result<service::persona::SkillSessionSnapshot> SkillInvocationService::Inv
     };
     callbacks.on_observation = [sessions, session_id = request.session_id,
                                 skill_id = request.call.skill_id,
-                                on_observation = std::move(on_observation)](
+                                execution_id = started.value().execution_id,
+                                terminal, on_observation = std::move(on_observation)](
                                    service::persona::SkillObservation observation) mutable {
+        if (terminal->load()) return;
+        // 即使终态检查后发生取消，新一轮 Session 也必须拒绝旧 execution 的观察。
+        if (!observation.execution_id.empty() && observation.execution_id != execution_id) return;
+        observation.execution_id = execution_id;
         if (observation.session_id.empty()) observation.session_id = session_id;
         if (observation.skill_id.empty()) observation.skill_id = skill_id;
         sessions->RecordObservation(observation);
@@ -106,22 +117,29 @@ core::Result<service::persona::SkillSessionSnapshot> SkillInvocationService::Inv
             return core::Status::Error(core::ErrorCode::AlreadyExists,
                                        "skill execution id is already active");
         }
-        active_executions_[started.value().execution_id] = executor.value();
+        active_executions_[started.value().execution_id] = {executor.value(), callbacks.on_result, cancelled};
     }
-    auto execution = executor.value()->Start(request, std::move(callbacks));
+    auto start_completion = callbacks.on_result;
+    auto execution = [&]() -> core::Result<service::persona::SkillSessionSnapshot> {
+        try { return executor.value()->Start(request, std::move(callbacks)); }
+        catch (const std::exception& error) { return core::Status::Error(core::ErrorCode::InternalError, error.what()); }
+        catch (...) { return core::Status::Error(core::ErrorCode::InternalError, "tool executor threw"); }
+    }();
+    if (cancelled->load()) {
+        try { executor.value()->Cancel(started.value().execution_id); }
+        catch (...) { core::LoggerAdapter::ForModule("skill").warn("executor cancellation after Start failed"); }
+    }
     if (!execution.ok()) {
-        std::lock_guard lock(active_mutex_);
-        active_executions_.erase(started.value().execution_id);
-        sessions_->MarkFailed(request.session_id, request.call.skill_id,
-                              execution.status().message(), request.trace_id,
-                              started.value().execution_id);
+        SkillResult failed;
+        failed.status = execution.status();
+        start_completion(std::move(failed));
         return execution.status();
     }
     return started;
 }
 
 core::Status SkillInvocationService::Cancel(std::string_view execution_id) {
-    std::shared_ptr<ISkillExecutor> executor;
+    ActiveExecution execution;
     {
         std::lock_guard lock(active_mutex_);
         auto it = active_executions_.find(std::string(execution_id));
@@ -129,10 +147,19 @@ core::Status SkillInvocationService::Cancel(std::string_view execution_id) {
             return core::Status::Error(core::ErrorCode::NotFound,
                                        std::string("execution not found: ") + std::string(execution_id));
         }
-        executor = it->second;
+        execution = std::move(it->second);
         active_executions_.erase(it);
     }
-    return executor->Cancel(execution_id);
+    execution.cancelled->store(true);
+    core::Status status;
+    try { status = execution.executor->Cancel(execution_id); }
+    catch (const std::exception& error) { status = core::Status::Error(core::ErrorCode::InternalError, error.what()); }
+    catch (...) { status = core::Status::Error(core::ErrorCode::InternalError, "tool cancellation threw"); }
+    SkillResult result;
+    result.execution_id = execution_id;
+    result.status = core::Status::Error(core::ErrorCode::Cancelled, "skill invocation cancelled");
+    execution.complete(std::move(result));
+    return status;
 }
 
 SkillToolCallCoordinator::SkillToolCallCoordinator(
@@ -191,6 +218,10 @@ llm::ChatMessage CheckedToolMessage(
         result.skill_id = call.skill_id;
         result.status = core::Status::Error(core::ErrorCode::InternalError,
                                            "tool result validator threw an exception");
+    } catch (...) {
+        result.call_id = call.call_id;
+        result.skill_id = call.skill_id;
+        result.status = core::Status::Error(core::ErrorCode::InternalError, "tool result validator threw");
     }
     auto message = MakeToolResultMessage(result, context.result_format);
     if (!result.status.ok()) {
@@ -225,6 +256,8 @@ core::Status AuthorizeTool(
         return status;
     } catch (const std::exception&) {
         return core::Status::Error(core::ErrorCode::InternalError, "tool authorizer threw an exception");
+    } catch (...) {
+        return core::Status::Error(core::ErrorCode::InternalError, "tool authorizer threw");
     }
 }
 }
@@ -238,11 +271,19 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
     }
     auto calls = ParseToolCalls(response, *registry_);
     if (!calls.ok()) return calls.status();
+    const auto deadline = std::chrono::steady_clock::now() + context.timeout;
     std::vector<llm::ChatMessage> messages;
     messages.reserve(calls.value().size());
     for (const auto& call : calls.value()) {
+        if (context.cancellation.stop_requested()) return core::Status::Error(core::ErrorCode::Cancelled, "tool phase cancelled");
         auto manifest = registry_->Require(call.skill_id, call.skill_version);
         if (!manifest.ok()) return manifest.status();
+        if (std::chrono::steady_clock::now() >= deadline) {
+            SkillResult timed_out;
+            timed_out.status = core::Status::Error(core::ErrorCode::Timeout, "skill execution timed out");
+            messages.push_back(CheckedToolMessage(std::move(timed_out), manifest.value(), call, context));
+            continue;
+        }
         if (auto status = AuthorizeTool(context, call, manifest.value()); !status.ok()) {
             SkillResult rejected;
             rejected.call_id = call.call_id;
@@ -258,6 +299,17 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
             std::optional<SkillResult> result;
         };
         auto completion = std::make_shared<CompletionState>();
+        std::stop_callback cancellation(context.cancellation, [completion, call] {
+            std::lock_guard lock(completion->mutex);
+            if (completion->done) return;
+            SkillResult result;
+            result.call_id = call.call_id;
+            result.skill_id = call.skill_id;
+            result.status = core::Status::Error(core::ErrorCode::Cancelled, "tool phase cancelled");
+            completion->result = std::move(result);
+            completion->done = true;
+            completion->condition.notify_all();
+        });
         SkillExecutionRequest request;
         request.call = call;
         request.session_id = context.session_id;
@@ -283,7 +335,7 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
             continue;
         }
         std::unique_lock lock(completion->mutex);
-        if (!completion->condition.wait_for(lock, context.timeout, [&] { return completion->done; })) {
+        if (!completion->condition.wait_until(lock, deadline, [&] { return completion->done; })) {
             completion->done = true;
             // Cancel 允许同步触发 on_result；持有完成锁调用它会发生自锁。
             lock.unlock();
@@ -299,6 +351,10 @@ core::Result<std::vector<llm::ChatMessage>> SkillToolCallCoordinator::Execute(
         }
         auto result = std::move(*completion->result);
         lock.unlock();
+        if (context.cancellation.stop_requested()) {
+            invocation_->Cancel(started.value().execution_id);
+            return core::Status::Error(core::ErrorCode::Cancelled, "tool phase cancelled");
+        }
         messages.push_back(CheckedToolMessage(std::move(result), manifest.value(), call, context));
     }
     return messages;
@@ -323,6 +379,7 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
     }
 
     struct State {
+        std::mutex mutex;
         std::vector<SkillCall> calls;
         SkillToolCallContext context;
         std::shared_ptr<const ISkillRegistry> registry;
@@ -331,6 +388,43 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
         std::size_t next = 0;
         std::function<void(core::Result<std::vector<llm::ChatMessage>>)> completion;
         std::atomic<bool> completed{false};
+        std::string active_execution;
+        std::shared_ptr<ISkillDeadline> deadline;
+        std::optional<std::stop_callback<std::function<void()>>> cancellation;
+
+        void Abort(core::Status status) {
+            Completion callback;
+            std::string execution;
+            std::shared_ptr<ISkillDeadline> timer;
+            std::vector<llm::ChatMessage> results;
+            std::vector<SkillCall> unfinished;
+            {
+                std::lock_guard lock(mutex);
+                if (completed.exchange(true)) return;
+                callback = std::move(completion);
+                execution = std::move(active_execution);
+                timer = std::move(deadline);
+                results = std::move(messages);
+                unfinished.assign(calls.begin() + results.size(), calls.end());
+            }
+            if (timer) timer->Cancel();
+            // 不持完成锁调用 executor；Cancel 允许同步触发结果回调。
+            if (!execution.empty()) invocation->Cancel(execution);
+            core::LoggerAdapter::ForModule("skill").warn(
+                "[trace={}] tool phase aborted code={}", context.trace_id, static_cast<int>(status.code()));
+            if (!callback) return;
+            if (status.code() == core::ErrorCode::Timeout) {
+                // 与同步路径一致：可选工具超时回填工具错误；必需工具由 Turn 验收拒绝。
+                for (const auto& call : unfinished) {
+                    SkillResult timed_out;
+                    timed_out.status = core::Status::Error(core::ErrorCode::Timeout, "skill execution timed out");
+                    auto manifest = registry->Require(call.skill_id, call.skill_version);
+                    results.push_back(CheckedToolMessage(std::move(timed_out),
+                        manifest.ok() ? manifest.value() : SkillManifest{}, call, context));
+                }
+                callback(std::move(results));
+            } else callback(std::move(status));
+        }
     };
     auto state = std::make_shared<State>();
     state->calls = std::move(calls).value();
@@ -338,6 +432,27 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
     state->registry = registry_;
     state->invocation = invocation_;
     state->completion = std::move(completion);
+    if (state->context.timeout.count() <= 0) {
+        state->Abort(core::Status::Error(core::ErrorCode::Timeout, "tool deadline expired"));
+        return core::Status::Ok();
+    }
+    if (state->context.deadline_scheduler) {
+        std::weak_ptr<State> weak = state;
+        auto timer = state->context.deadline_scheduler->Schedule(
+            std::chrono::steady_clock::now() + state->context.timeout, [weak] {
+                if (auto active = weak.lock()) active->Abort(
+                    core::Status::Error(core::ErrorCode::Timeout, "tool phase deadline exceeded"));
+            });
+        if (!timer.ok()) return timer.status();
+        std::lock_guard lock(state->mutex);
+        if (state->completed.load()) timer.value()->Cancel();
+        else state->deadline = std::move(timer).value();
+    }
+    // stop_callback 构造时可能立即同步执行，不能持 State 锁。
+    state->cancellation.emplace(state->context.cancellation, [weak = std::weak_ptr<State>(state)] {
+        if (auto active = weak.lock()) active->Abort(
+            core::Status::Error(core::ErrorCode::Cancelled, "tool phase cancelled"));
+    });
     auto advance = std::make_shared<std::function<void()>>();
     // 自引用递归用 weak_ptr 打破 shared_ptr 环：否则 advance → lambda → advance 成环，
     // ExecuteAsync 返回后状态机（State 及其 messages/completion/context）无法释放。
@@ -345,13 +460,24 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
     *advance = [state, weak_advance]() mutable {
         auto self = weak_advance.lock();
         if (!self) return;
-        if (state->next >= state->calls.size()) {
-            if (!state->completed.exchange(true, std::memory_order_acq_rel)) {
-                state->completion(std::move(state->messages));
+        Completion finished;
+        std::vector<llm::ChatMessage> messages;
+        std::optional<SkillCall> next_call;
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->completed.load()) return;
+            if (state->next >= state->calls.size()) {
+                state->completed.store(true);
+                finished = std::move(state->completion);
+                messages = std::move(state->messages);
+                if (state->deadline) state->deadline->Cancel();
+            } else {
+                next_call = state->calls[state->next++];
             }
-            return;
         }
-        const auto call = state->calls[state->next++];
+        if (finished) { finished(std::move(messages)); return; }
+        if (!next_call) return;
+        const auto call = std::move(*next_call);
         auto manifest = state->registry->Require(call.skill_id, call.skill_version);
         const auto authorization = manifest.ok()
             ? AuthorizeTool(state->context, call, manifest.value()) : manifest.status();
@@ -360,8 +486,13 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
             rejected.call_id = call.call_id;
             rejected.skill_id = call.skill_id;
             rejected.status = authorization;
-            state->messages.push_back(CheckedToolMessage(
-                std::move(rejected), manifest.ok() ? manifest.value() : SkillManifest{}, call, state->context));
+            auto message = CheckedToolMessage(
+                std::move(rejected), manifest.ok() ? manifest.value() : SkillManifest{}, call, state->context);
+            {
+                std::lock_guard lock(state->mutex);
+                if (state->completed.load()) return;
+                state->messages.push_back(std::move(message));
+            }
             (*self)();
             return;
         }
@@ -377,19 +508,45 @@ core::Status SkillToolCallCoordinator::ExecuteAsync(
         // on_result 持有 self 强引用，保证执行器回调完成前状态机存活（与上方 weak_ptr 配合无环）。
         callbacks.on_result = [state, self, call_finished, declared_manifest, call](SkillResult result) mutable {
             if (call_finished->exchange(true, std::memory_order_acq_rel)) return;
-            state->messages.push_back(CheckedToolMessage(
-                std::move(result), declared_manifest, call, state->context));
+            if (state->completed.load()) return;
+            auto message = CheckedToolMessage(std::move(result), declared_manifest, call, state->context);
+            {
+                std::lock_guard lock(state->mutex);
+                if (state->completed.load()) return;
+                state->active_execution.clear();
+                state->messages.push_back(std::move(message));
+            }
             (*self)();
         };
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->completed.load()) return;
+            // 若在 Invoke 返回前取消，待其返回后再取消实际启动的执行实例。
+            state->active_execution.clear();
+        }
         auto started = state->invocation->Invoke(std::move(request), std::move(callbacks));
+        if (started.ok() && !call_finished->load()) {
+            std::lock_guard lock(state->mutex);
+            if (!state->completed.load()) state->active_execution = started.value().execution_id;
+        }
+        // 取消时执行实例可能尚未启动；Invoke 返回后补发取消，避免遗漏。
+        if (started.ok() && state->completed.load() && !call_finished->load()) {
+            state->invocation->Cancel(started.value().execution_id);
+            return;
+        }
         if (!started.ok()) {
             if (call_finished->exchange(true, std::memory_order_acq_rel)) return;
             SkillResult result;
             result.call_id = call.call_id;
             result.skill_id = call.skill_id;
             result.status = started.status();
-            state->messages.push_back(CheckedToolMessage(
-                std::move(result), declared_manifest, call, state->context));
+            auto message = CheckedToolMessage(std::move(result), declared_manifest, call, state->context);
+            {
+                std::lock_guard lock(state->mutex);
+                if (state->completed.load()) return;
+                state->active_execution.clear();
+                state->messages.push_back(std::move(message));
+            }
             (*self)();
         }
     };

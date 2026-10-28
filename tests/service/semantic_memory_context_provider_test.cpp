@@ -9,6 +9,8 @@
 #include <optional>
 #include <utility>
 #include <vector>
+#include <future>
+#include <thread>
 
 namespace {
 
@@ -154,6 +156,24 @@ TEST(SemanticMemoryContextProviderTest, PreservesScopeAndCompletesAcceptedLookup
     EXPECT_EQ(observed->recent_turns.size(), 2u);
     EXPECT_NE(observed->system_context.find("tenant-a-user-a-memory"), std::string::npos);
     EXPECT_EQ(observed->system_context.find("must-not-replace"), std::string::npos);
+}
+
+TEST(SemanticMemoryContextProviderTest, DispatchesContinuationOffInlineL0Callback) {
+    auto cache = std::make_shared<ManualAsyncSemanticCache>();
+    cache->complete_synchronously = true;
+    core::ThreadPool io({1, 8, "memory-context-test"});
+    ASSERT_TRUE(io.Start().ok());
+    SemanticMemoryContextProvider provider(cache);
+    provider.ConfigureBlockingPool(io);
+    std::promise<std::thread::id> done;
+    auto future = done.get_future();
+    ASSERT_TRUE(provider.BuildContextAsync(MakeRequest(), [&](auto result) {
+        EXPECT_TRUE(result.ok());
+        done.set_value(std::this_thread::get_id());
+    }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_NE(future.get(), std::this_thread::get_id());
+    io.Shutdown(true);
 }
 
 TEST(SemanticMemoryContextProviderTest, ReturnsStartFailureWithoutCompletion) {

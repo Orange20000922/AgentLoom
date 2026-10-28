@@ -9,7 +9,9 @@
 #include "skill_session_manager.h"
 #include "stateful_skill_registry.h"
 #include "../../skill/skill_executor.h"
+#include "../../skill/skill_turn_plan.h"
 #include "tool_memory_provider.h"
+#include "context_plan.h"
 
 #include <chrono>
 #include <atomic>
@@ -29,6 +31,10 @@ struct RecalledContext {
     bool l0_hit = false;
     bool l3_hit = false;
     bool l4_hit = false;
+    bool tool_lookup_done = false;
+    std::optional<ToolMemoryContext> recalled_tools;
+    std::vector<ContextItem> items;
+    ContextBudgetReport budget_report;
 };
 
 struct MemoryContextRequest {
@@ -97,12 +103,14 @@ public:
 struct SemanticMemoryContextProviderOptions {
     std::size_t max_recent_turns = 10;
     int l3_top_k = 5;
+    core::ThreadPool* blocking_pool = nullptr;
 };
 
 class SemanticMemoryContextProvider final : public IMemoryContextProvider,
                                             public IAsyncMemoryContextProvider,
                                             public IAsyncMemoryAdmissionProvider {
 public:
+    void ConfigureBlockingPool(core::ThreadPool& pool) { options_.blocking_pool = &pool; }
     SemanticMemoryContextProvider(
         std::shared_ptr<semantic_cache::ISemanticCache> l0_cache,
         std::shared_ptr<memory::LongTermMemoryCompressor> l3_memory = nullptr,
@@ -273,6 +281,14 @@ struct ChatResponse {
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
     std::int64_t total_tokens = 0;
+    ContextBudgetReport context_budget;
+    std::vector<LlmCallObservation> llm_calls;
+    std::vector<std::string> tools_declared;
+    std::vector<std::string> required_tools;
+    std::vector<std::string> satisfied_tools;
+    std::vector<std::string> degraded_reasons;
+    std::vector<std::string> tools_recalled;
+    std::vector<std::string> tool_calls;
 };
 
 using ChatCallback = std::function<void(core::Result<ChatResponse>)>;
@@ -288,6 +304,11 @@ struct PersonaRuntimeOptions {
     std::shared_ptr<const agent::skill::ISkillToolPolicy> skill_tool_policy;
     agent::skill::ToolResultFormat tool_result_format = agent::skill::ToolResultFormat::LegacyInline;
     std::size_t max_tool_result_bytes = 64 * 1024;
+    std::shared_ptr<agent::skill::ISkillDeadlineScheduler> skill_deadline_scheduler;
+    std::shared_ptr<const agent::skill::ISkillRegistry> skill_registry;
+    ContextBudgets context_budgets;
+    std::shared_ptr<const ITrustedContextProvider> trusted_context_provider;
+    std::shared_ptr<const IPersonaRuntimeObserver> observer;
 };
 
 class PersonaRuntime {
@@ -331,11 +352,16 @@ public:
     /// 外部停服线程关闭 admission、取消在途 LLM，等待最终 callback 及其捕获对象释放。
     /// 不得在本 runtime 的 callback 内同步调用；调度 lane/quota 仍按原时机释放。
     void Shutdown() noexcept;
+    // 仅启动阶段装配；定时器复用宿主事件循环，必须先 Shutdown Runtime 再停止宿主。
+    void ConfigureSkillDeadlineScheduler(std::shared_ptr<agent::skill::ISkillDeadlineScheduler> scheduler) {
+        options_.skill_deadline_scheduler = std::move(scheduler);
+    }
 
 private:
     enum class AsyncTurnPhase : std::uint8_t {
         Admitted,
         MemoryLookupPending,
+        ToolLookupPending,
         Preparing,
         UserEmotionPending,
         LlmPending,
@@ -364,6 +390,10 @@ private:
         std::size_t tool_round = 0;
         std::shared_ptr<std::atomic<bool>> cancel_requested;
         AnswerCacheInfo answer_cache;
+        std::stop_token cancellation;
+        agent::skill::SkillTurnPlan tool_plan;
+        bool prefetch_done = false;
+        std::vector<LlmCallObservation> llm_calls;
         std::chrono::steady_clock::time_point started_at;
         std::chrono::steady_clock::time_point io_submitted_at;
         ChatLatencyBreakdown latency;
@@ -389,6 +419,19 @@ private:
         PreparedChat prepared,
         std::vector<ConversationTurn> recent_copy,
         EmotionAnalysis emotion);
+    agent::skill::SkillToolCallContext ToolCallContext(const SessionState& session,
+        const PreparedChat& prepared) const;
+    core::Status ResolveToolPlan(const SessionState& session, PreparedChat& prepared,
+        const ToolMemoryContext& recalled) const;
+    core::Status AppendToolResults(PreparedChat& prepared,
+        const llm::ChatCompletionResponse& calls, std::vector<llm::ChatMessage> messages) const;
+    LlmCallObservation MakeObservation(const PreparedChat& prepared) const;
+    void ObservePrompt(const PreparedChat& prepared) const noexcept;
+    void ObserveTurn(const PreparedChat& prepared, core::Status status) const noexcept;
+    core::Status CheckToolRequirements(const PreparedChat& prepared) const;
+    // 响应仅在当前调用栈中借用；失败时为空，不跨线程保存或转移底层对象所有权。
+    void ObserveLlmResult(PreparedChat& prepared, const llm::ChatCompletionResponse* response,
+        core::Status status) const noexcept;
     core::Result<std::vector<llm::ChatMessage>> BuildMessages(
         SessionState& session,
         const RecalledContext& memory,

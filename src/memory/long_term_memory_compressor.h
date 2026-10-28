@@ -121,6 +121,17 @@ core::Result<std::vector<std::string>> ParseL3CompressionFacts(
     std::size_t max_facts,
     std::size_t max_fact_bytes);
 
+struct L3Fact {
+    std::string text;
+    std::string source_role = "unknown";
+    double uncertainty = 1.0;
+    std::vector<std::string> source_record_ids;
+    std::string evidence;
+};
+// 新写入严格校验来源记录与原文证据；旧字符串记录读取时保持 unknown。
+core::Result<std::vector<L3Fact>> ParseL3FactsWithSources(std::string_view output,
+    const std::vector<storage::CacheRecord>& records, std::size_t max_facts, std::size_t max_bytes);
+
 /// Long-term memory compressor (L3 layer).
 ///
 /// Compresses daily L0 cache records into structured fact vectors using LLM,
@@ -198,7 +209,7 @@ private:
     );
 
     /// Call LLM to compress records into fact list.
-    core::Result<std::vector<std::string>> CompressToFacts(
+    core::Result<std::vector<L3Fact>> CompressToFacts(
         const std::vector<storage::CacheRecord>& records
     );
 
@@ -206,7 +217,7 @@ private:
     core::Result<int> StoreFacts(
         const MemoryOwner& owner,
         const std::string& date,
-        const std::vector<std::string>& facts,
+        const std::vector<L3Fact>& facts,
         int source_record_count
     );
 

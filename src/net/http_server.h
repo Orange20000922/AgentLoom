@@ -85,6 +85,8 @@ public:
     bool running() const noexcept;
     std::uint16_t port() const noexcept;
     ConnectionPoolStats ConnectionStats() const;
+    // 宿主定时器复用现有事件循环；调用方必须在 Stop 前结束并 drain 定时操作。
+    asio::any_io_executor executor() noexcept { return io_context_.get_executor(); }
     std::vector<ConnectionSnapshot> ConnectionSnapshots() const;
 
 private:

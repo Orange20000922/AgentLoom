@@ -63,13 +63,14 @@ public:
         EXPECT_EQ(request.call.skill_id, kSkill);
         skill::SkillResult result;
         result.call_id = request.call.call_id;
-        result.result_json = R"({"fact":"verified"})";
+        result.result_json = result_json;
         result.provenance_json = R"({"source_id":"published-card","version":"kb-test-1"})";
         callbacks.on_result(std::move(result));
         return persona::SkillSessionSnapshot{};
     }
     core::Status Cancel(std::string_view) override { return core::Status::Ok(); }
     std::atomic<int> starts{0};
+    std::string result_json = R"({"fact":"verified"})";
 };
 
 class CompletedLlmOperation final : public llm::IAsyncLlmOperation {
@@ -90,7 +91,11 @@ public:
         requests_.push_back(request);
         llm::ChatCompletionResponse response;
         response.model = "gateway-tool-test";
-        if (requests_.size() == 1 || repeat_tool_calls) {
+        response.prompt_tokens = 11;
+        response.completion_tokens = 3;
+        response.total_tokens = 14;
+        response.finish_reason = "stop";
+        if (!skip_tools && (requests_.size() == 1 || repeat_tool_calls)) {
             response.content = "tool planning text";
             response.reasoning_content = "tool planning reasoning";
             response.tool_calls.push_back({kCall, "test_lookup", "{}"});
@@ -137,6 +142,7 @@ public:
     }
     std::atomic<int> async_calls{0};
     bool repeat_tool_calls = false;
+    bool skip_tools = false;
 private:
     mutable std::mutex mutex_;
     std::vector<llm::ChatCompletionRequest> requests_;
@@ -153,13 +159,18 @@ struct Harness {
         std::make_shared<persona::SkillSessionManager>();
     std::shared_ptr<ImmediateExecutor> executor = std::make_shared<ImmediateExecutor>();
 
-    Harness() {
+    Harness(bool prefetch = false) {
         skill::SkillManifest manifest;
         manifest.skill_id = kSkill;
         manifest.tool_name = "test_lookup";
         manifest.version = "1.0.0";
         manifest.description = "retrieve a fact";
         manifest.executor.reference = kSkill;
+        if (prefetch) {
+            manifest.exposure = skill::ToolExposure::Always;
+            manifest.execution = skill::ToolExecution::Prefetch;
+            manifest.read_only = true;
+        }
         EXPECT_TRUE(registry->Register(std::move(manifest)).ok());
         EXPECT_TRUE(factory->RegisterReference("native", kSkill, executor).ok());
     }
@@ -442,6 +453,289 @@ TEST(GatewayToolCallingStreamingTest, HidesFirstRoundTextDistinguishesGeneration
     EXPECT_EQ(generations.size(), 2);
     EXPECT_EQ(tool_states, 2);
     harness.CheckFollowUp(true);
+}
+
+class RequiredLookupPolicy final : public skill::ISkillToolPolicy {
+public:
+    core::Status Authorize(const skill::SkillToolCallContext&, const skill::SkillCall&,
+        const skill::SkillManifest&) const override {
+        return deny ? core::Status::Error(core::ErrorCode::PermissionDenied, "lookup denied") : core::Status::Ok();
+    }
+    core::Status ValidateResult(const skill::SkillToolCallContext&, const skill::SkillCall&,
+        const skill::SkillManifest&, const skill::SkillResult&) const override { return core::Status::Ok(); }
+    core::Result<std::vector<skill::SkillToolRequirement>> RequiredTools(
+        const skill::SkillToolCallContext&) const override {
+        return std::vector<skill::SkillToolRequirement>{{kSkill, "1.0.0"}};
+    }
+    core::Result<std::string> BindPrefetchArguments(const skill::SkillToolCallContext&,
+        const skill::SkillManifest&, std::string_view) const override { return std::string("{}"); }
+    bool deny = false;
+};
+
+class RecordingObserver final : public persona::IPersonaRuntimeObserver {
+public:
+    void PromptReady(const persona::LlmCallObservation& item) const override {
+        std::lock_guard lock(mutex);
+        prompts.push_back(item);
+    }
+    void LlmCompleted(const persona::LlmCallObservation& item) const override {
+        std::lock_guard lock(mutex);
+        calls.push_back(item);
+    }
+    void TurnCompleted(const persona::LlmCallObservation& item) const override {
+        std::lock_guard lock(mutex);
+        turns.push_back(item);
+    }
+    mutable std::mutex mutex;
+    mutable std::vector<persona::LlmCallObservation> prompts;
+    mutable std::vector<persona::LlmCallObservation> calls;
+    mutable std::vector<persona::LlmCallObservation> turns;
+};
+
+// 同步、异步、流式复用同一验收，断言实际请求、执行次数与终态提交。
+class RequiredToolRuntimeTest : public testing::TestWithParam<int> {};
+TEST_P(RequiredToolRuntimeTest, PrefetchRunsBeforeFirstGenerationWithoutModelToolChoice) {
+    Harness harness(true);
+    harness.llm_client->skip_tools = true;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+    auto dependencies = harness.Dependencies(GetParam() != 0);
+    dependencies.tool_memory_provider.reset(); // Always 不依赖召回，必需项也独立于 top_k。
+    gateway::PersonaGatewayServer server(options, dependencies);
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.trace_id = "prefetch-test";
+    request.message = "arbitrary text";
+    request.stream = GetParam() == 2;
+    request.event_sink = [](const auto&) { return core::Status::Ok(); };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> promise;
+    auto future = promise.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { promise.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    EXPECT_EQ(harness.executor->starts, 1);
+    const auto requests = harness.llm_client->Requests();
+    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_EQ(requests[0].tools.size(), 1u);
+    EXPECT_EQ(requests[0].tools[0].name, "test_lookup");
+    ASSERT_EQ(requests[0].messages.back().role, llm::ChatRole::Tool);
+    EXPECT_NE(requests[0].messages.back().content.find("verified"), std::string::npos);
+    EXPECT_EQ(harness.memory->admissions, 1);
+}
+
+TEST_P(RequiredToolRuntimeTest, MissingRequiredCallFailsWithoutCommitOrLeakingStreamingText) {
+    Harness harness;
+    harness.llm_client->skip_tools = true;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+    auto observer = std::make_shared<RecordingObserver>();
+    options.runtime.observer = observer;
+    gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam() != 0));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.trace_id = "required-missing";
+    request.message = "lookup";
+    request.stream = GetParam() == 2;
+    std::string text;
+    request.event_sink = [&](const auto& event) {
+        if (event.kind == llm::LlmStreamEventKind::TextDelta) text += event.text;
+        return core::Status::Ok();
+    };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> promise;
+    auto future = promise.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { promise.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(future.get().status().code(), core::ErrorCode::FailedPrecondition);
+    EXPECT_EQ(harness.memory->admissions, 0);
+    EXPECT_EQ(harness.executor->starts, 0);
+    EXPECT_TRUE(text.empty());
+    EXPECT_EQ(server.sessions().GetSessionSnapshot(kSession).value().recent_turn_count, 0u);
+    ASSERT_EQ(observer->turns.size(), 1u);
+    EXPECT_EQ(observer->turns.back().status.code(), core::ErrorCode::FailedPrecondition);
+    EXPECT_TRUE(observer->turns.back().satisfied_tools.empty());
+    EXPECT_EQ(observer->turns.back().required_tools, std::vector<std::string>{"test_lookup"});
+}
+
+TEST_P(RequiredToolRuntimeTest, DeniedPrefetchNeverExecutesOrGenerates) {
+    Harness harness(true);
+    auto policy = std::make_shared<RequiredLookupPolicy>();
+    policy->deny = true;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = policy;
+    gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam() != 0));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "lookup";
+    request.stream = GetParam() == 2;
+    request.event_sink = [](const auto&) { return core::Status::Ok(); };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> done;
+    auto future = done.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { done.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(future.get().status().code(), core::ErrorCode::PermissionDenied);
+    EXPECT_TRUE(harness.llm_client->Requests().empty());
+    EXPECT_EQ(harness.executor->starts, 0);
+    EXPECT_EQ(harness.memory->admissions, 0);
+}
+
+TEST_P(RequiredToolRuntimeTest, RequiredExecutionFailureStopsBeforeFollowUpAndCommit) {
+    Harness harness;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+    auto observer = std::make_shared<RecordingObserver>();
+    options.runtime.observer = observer;
+    auto dependencies = harness.Dependencies(GetParam() != 0);
+    dependencies.skill_executor_factory = std::make_shared<skill::InMemorySkillExecutorFactory>();
+    gateway::PersonaGatewayServer server(options, dependencies);
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "lookup";
+    request.stream = GetParam() == 2;
+    request.event_sink = [](const auto&) { return core::Status::Ok(); };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> done;
+    auto future = done.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { done.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_FALSE(future.get().ok());
+    EXPECT_EQ(harness.llm_client->Requests().size(), 1u);
+    EXPECT_EQ(harness.memory->admissions, 0);
+    EXPECT_EQ(server.sessions().GetSessionSnapshot(kSession).value().recent_turn_count, 0u);
+    ASSERT_EQ(observer->calls.size(), 1u);
+    ASSERT_EQ(observer->prompts.size(), 1u);
+    EXPECT_GT(observer->calls[0].max_tokens, 0);
+    EXPECT_FALSE(observer->calls[0].required_tools.empty());
+    if (GetParam() != 2) EXPECT_EQ(observer->calls[0].total_tokens, 14);
+    ASSERT_EQ(observer->turns.size(), 1u);
+    EXPECT_FALSE(observer->turns[0].status.ok());
+    if (GetParam() != 2) EXPECT_EQ(observer->turns[0].total_tokens, 14);
+}
+INSTANTIATE_TEST_SUITE_P(ExecutionPaths, RequiredToolRuntimeTest, testing::Values(0, 1, 2));
+
+TEST_P(RequiredToolRuntimeTest, RecallFailureRetainsAlwaysAndReportsDegradedReason) {
+    class UnavailableRecall final : public persona::IToolMemoryProvider {
+    public:
+        core::Result<persona::ToolMemoryContext> Query(const persona::ToolMemoryQuery&) override {
+            return core::Status::Error(core::ErrorCode::Unavailable, "recall offline");
+        }
+    };
+    Harness harness(true);
+    harness.llm_client->skip_tools = true;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+    auto observer = std::make_shared<RecordingObserver>();
+    options.runtime.observer = observer;
+    auto dependencies = harness.Dependencies(GetParam() != 0);
+    dependencies.tool_memory_provider = std::make_shared<UnavailableRecall>();
+    gateway::PersonaGatewayServer server(options, dependencies);
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "irrelevant text";
+    request.stream = GetParam() == 2;
+    request.event_sink = [](const auto&) { return core::Status::Ok(); };
+    std::promise<bool> done;
+    auto future = done.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { done.set_value(result.ok()); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_TRUE(future.get());
+    const auto requests = harness.llm_client->Requests();
+    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_EQ(requests[0].tools.size(), 1u);
+    EXPECT_NE(requests[0].messages[0].content.find("test_lookup"), std::string::npos);
+    ASSERT_EQ(observer->prompts.size(), 1u);
+    EXPECT_EQ(observer->prompts[0].degraded_reasons, std::vector<std::string>{"recall_unavailable"});
+    EXPECT_EQ(harness.executor->starts, 1);
+}
+
+TEST_P(RequiredToolRuntimeTest, RequiredContextAndResultBudgetsFailWithSourceDiagnostics) {
+    for (const int mode : {0, 1, 2}) {
+        Harness harness(true);
+        auto options = harness.Options();
+        options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+        auto observer = std::make_shared<RecordingObserver>();
+        options.runtime.observer = observer;
+        if (mode == 1) options.runtime.max_tool_result_bytes = 8;
+        else if (mode == 0) options.runtime.context_budgets[static_cast<std::size_t>(persona::ContextSource::L4)].max_bytes = 1;
+        else options.runtime.max_prompt_characters = 1;
+        gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam() != 0));
+        ASSERT_TRUE(server.Start().ok());
+        CreateSession(server);
+        gateway::ChatGatewayRequest request;
+        request.session_id = kSession;
+        request.authenticated_user_uuid = kUser;
+        request.message = "lookup";
+        request.stream = GetParam() == 2;
+        request.event_sink = [](const auto&) { return core::Status::Ok(); };
+        std::promise<core::Status> done;
+        auto future = done.get_future();
+        ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { done.set_value(result.status()); }).ok());
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        const auto status = future.get();
+        EXPECT_EQ(status.code(), core::ErrorCode::ResourceExhausted);
+        EXPECT_NE(status.message().find(mode == 1 ? "tool_result" : mode == 0 ? "L4" : "prompt"), std::string::npos);
+        EXPECT_TRUE(harness.llm_client->Requests().empty());
+        EXPECT_EQ(harness.memory->admissions, 0);
+        ASSERT_EQ(observer->turns.size(), 1u);
+        EXPECT_GT(observer->turns[0].context.input_bytes[static_cast<std::size_t>(persona::ContextSource::L4)], 0u);
+    }
+}
+
+TEST(GatewayToolCallingShutdownTest, HangingToolCancelsAndLateResultDoesNotReenterRuntime) {
+    class HangingExecutor final : public skill::ISkillExecutor {
+    public:
+        core::Result<persona::SkillSessionSnapshot> Start(const skill::SkillExecutionRequest&,
+            skill::SkillExecutionCallbacks callbacks) override {
+            result = std::move(callbacks.on_result);
+            started.set_value();
+            return persona::SkillSessionSnapshot{};
+        }
+        core::Status Cancel(std::string_view) override { ++cancelled; return core::Status::Ok(); }
+        std::promise<void> started;
+        std::function<void(skill::SkillResult)> result;
+        std::atomic<int> cancelled{0};
+    };
+    Harness harness;
+    auto executor = std::make_shared<HangingExecutor>();
+    auto started = executor->started.get_future();
+    auto factory = std::make_shared<skill::InMemorySkillExecutorFactory>();
+    ASSERT_TRUE(factory->RegisterReference("native", kSkill, executor).ok());
+    auto dependencies = harness.Dependencies(true);
+    dependencies.skill_executor_factory = factory;
+    gateway::PersonaGatewayServer server(harness.Options(), dependencies);
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "lookup";
+    std::promise<core::ErrorCode> completed;
+    auto future = completed.get_future();
+    std::atomic<int> callbacks{0};
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) {
+        if (callbacks.fetch_add(1) == 0) completed.set_value(result.status().code());
+    }).ok());
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    server.Stop();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(future.get(), core::ErrorCode::Cancelled);
+    EXPECT_EQ(executor->cancelled, 1);
+    executor->result(skill::SkillResult{});
+    EXPECT_EQ(callbacks, 1);
 }
 
 }

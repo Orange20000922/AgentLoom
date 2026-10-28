@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include "../skill/skill_manifest.h"
+#include "../service/persona/context_plan.h"
 #include <unordered_map>
 #include <vector>
 
@@ -383,6 +384,7 @@ struct PersonaGatewayConfigOptions {
     std::size_t session_max_active_sessions = 1024;
     std::size_t runtime_recent_raw_turns = 10;
     std::size_t runtime_max_prompt_characters = 128 * 1024;
+    agent::service::persona::ContextBudgets runtime_context_budgets;
     std::string runtime_default_model;
     GatewayStreamingConfigOptions streaming;
     bool request_filter_enabled = true;
@@ -531,6 +533,7 @@ PersonaGatewayServerOptionsT ToPersonaGatewayServerOptions(const MultimodalServe
     options.session.max_active_sessions = config.persona_gateway.session_max_active_sessions;
     options.runtime.recent_raw_turns = config.persona_gateway.runtime_recent_raw_turns;
     options.runtime.max_prompt_characters = config.persona_gateway.runtime_max_prompt_characters;
+    options.runtime.context_budgets = config.persona_gateway.runtime_context_budgets;
     options.streaming.transport = config.persona_gateway.streaming.transport;
     options.streaming.replay.max_turns = config.persona_gateway.streaming.max_replay_turns;
     options.streaming.replay.max_events_per_turn = config.persona_gateway.streaming.max_replay_events;

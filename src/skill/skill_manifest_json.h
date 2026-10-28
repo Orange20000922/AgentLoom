@@ -3,6 +3,7 @@
 #include "skill_manifest.h"
 
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace agent::skill {
 
@@ -11,6 +12,18 @@ namespace agent::skill {
 // 避免两处重复的字段映射，也不引入跨库链接依赖。
 inline SkillManifest ParseSkillManifestJson(const nlohmann::json& object) {
     SkillManifest manifest;
+    if (object.contains("exposure")) {
+        const auto value = object.at("exposure").get<std::string>();
+        if (value == "always") manifest.exposure = ToolExposure::Always;
+        else if (value != "recall") throw std::invalid_argument("unsupported tool exposure");
+    }
+    if (object.contains("execution")) {
+        const auto value = object.at("execution").get<std::string>();
+        if (value == "prefetch") manifest.execution = ToolExecution::Prefetch;
+        else if (value != "model") throw std::invalid_argument("unsupported tool execution");
+    }
+    if (object.contains("read_only")) manifest.read_only = object.at("read_only").get<bool>();
+    if (object.contains("requires_confirmation")) manifest.requires_confirmation = object.at("requires_confirmation").get<bool>();
     if (object.contains("skill_id") && object["skill_id"].is_string()) manifest.skill_id = object["skill_id"].get<std::string>();
     if (object.contains("version") && object["version"].is_string()) manifest.version = object["version"].get<std::string>();
     if (object.contains("tool_name") && object["tool_name"].is_string()) manifest.tool_name = object["tool_name"].get<std::string>();

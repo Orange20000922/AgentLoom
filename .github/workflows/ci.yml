@@ -348,6 +348,9 @@ jobs:
             tls_tests \
             storage_tests \
             semantic_cache_tests \
+            memory_fact_codec_tests \
+            vector_index_manager_tests \
+            context_plan_benchmark \
             document_tests \
             config_tests \
             persona_runtime_tests \
