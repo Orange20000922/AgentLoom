@@ -51,6 +51,14 @@ Local LLM 配置使用外部构建好的 llama.cpp。开发者必须提供源码
 
 Faiss 和 Windows MKL 的 `.conda` 归档通过 `.github/scripts/extract-conda-package.py` 解包。脚本只提取 `pkg-*.tar.zst` payload，并使用安全 tar 过滤器。CI 和本地脚本在使用固定 URL 时同时验证 SHA-256。
 
+Windows MKL 2023.1.0 固定从 Anaconda 官方 channel 下载：
+`https://conda.anaconda.org/anaconda/win-64/mkl-2023.1.0-h6b88ed4_46358.conda`。
+旧 `repo.anaconda.com/pkgs/main` 地址曾在下游 Windows CI 返回 HTTP 403；
+本地准备脚本与 Windows CI 已同步使用新地址，SHA-256 仍为
+`2B06DA1AE1ED81D9A798395604C7653365E2B197A078FDE6FD47DC6218B730BB`。
+此次仅更换下载源，归档内容、解包目录和 ABI 不变，可继续复用现有依赖缓存。
+本地脚本仍支持通过 `MKL_URL` / `MKL_SHA256` 环境变量覆盖下载配置。
+
 ## CI 闭环
 
 两个平台的 CI 都执行以下阶段：

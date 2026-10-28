@@ -39,7 +39,8 @@ $BoostUrl = "https://archives.boost.io/release/1.85.0/source/boost_$BoostVersion
 $EigenUrl = "https://gitlab.com/libeigen/eigen/-/archive/$EigenVersion/eigen-$EigenVersion.zip"
 $DefaultFaissUrl = "https://conda.anaconda.org/pytorch/win-64/libfaiss-1.14.1-py3.12_h2e52968_0_cpu.conda"
 $DefaultFaissSha256 = "D42FF92B45F8D202C8FA205815690D876C26AF22295546E31F8253EB77C369FA"
-$DefaultMklUrl = "https://repo.anaconda.com/pkgs/main/win-64/mkl-2023.1.0-h6b88ed4_46358.conda"
+# Anaconda 官方 channel 提供同一归档，避免旧 repo 地址在 Windows CI 返回 403。
+$DefaultMklUrl = "https://conda.anaconda.org/anaconda/win-64/mkl-2023.1.0-h6b88ed4_46358.conda"
 $DefaultMklSha256 = "2B06DA1AE1ED81D9A798395604C7653365E2B197A078FDE6FD47DC6218B730BB"
 $OpenCvUrl = "https://github.com/opencv/opencv/releases/download/$OpenCvVersion/opencv-$OpenCvVersion-windows.exe"
 $OpenCvSha256 = "BFF38466091C313DAC21A0B73EEA8278316A89C1D434C6F0B10697E087670168"
