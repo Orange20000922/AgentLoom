@@ -25,6 +25,9 @@ std::string DefaultToolName(std::string_view skill_id) {
 }
 
 core::Status ValidateManifest(const SkillManifest& manifest) {
+    if (manifest.execution == ToolExecution::Prefetch && (!manifest.read_only || manifest.requires_confirmation)) {
+        return core::Status::Error(core::ErrorCode::InvalidArgument, "prefetch requires a read-only tool");
+    }
     if (manifest.skill_id.empty() || manifest.version.empty()) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "skill_id and version are required");

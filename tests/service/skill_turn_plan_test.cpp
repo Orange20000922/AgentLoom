@@ -20,14 +20,106 @@ skill::SkillManifest Manifest(std::string id) {
     result.description = "canonical description";
     return result;
 }
-TEST(SkillTurnPlanTest, RecallUsesCanonicalManifestAndExcludesStaleVersions) {
+class Policy final : public skill::ISkillToolPolicy {
+public:
+    core::Status Authorize(const skill::SkillToolCallContext&, const skill::SkillCall&,
+        const skill::SkillManifest&) const override { return core::Status::Ok(); }
+    core::Status ValidateResult(const skill::SkillToolCallContext&, const skill::SkillCall&,
+        const skill::SkillManifest&, const skill::SkillResult&) const override { return core::Status::Ok(); }
+    core::Result<std::vector<skill::SkillToolRequirement>> RequiredTools(
+        const skill::SkillToolCallContext&) const override { return required; }
+    core::Result<std::string> BindPrefetchArguments(const skill::SkillToolCallContext&,
+        const skill::SkillManifest&, std::string_view query) const override {
+        return nlohmann::json{{"query", query}}.dump();
+    }
+    std::vector<skill::SkillToolRequirement> required;
+};
+
+TEST(SkillTurnPlanTest, AlwaysSurvivesEmptyRecallAndStaleCandidatesUseCanonicalManifest) {
     skill::InMemorySkillRegistry registry;
-    ASSERT_TRUE(registry.Register(Manifest("lookup")).ok());
-    auto plan = skill::BuildSkillTurnPlan(registry, {{"lookup", "1"}, {"missing", "1"}, {"lookup", "old"}}, {}, "q");
+    auto always = Manifest("always");
+    always.exposure = skill::ToolExposure::Always;
+    ASSERT_TRUE(registry.Register(always).ok());
+    ASSERT_TRUE(registry.Register(Manifest("optional")).ok());
+    auto plan = skill::BuildSkillTurnPlan(registry, {{"missing", "1"}, {"optional", "old"}, {"always", "1"}}, {}, "q");
     ASSERT_TRUE(plan.ok());
     ASSERT_EQ(plan.value().tools.size(), 1u);
     EXPECT_EQ(plan.value().tools[0].description, "canonical description");
     EXPECT_EQ(plan.value().degraded_reasons.size(), 2u);
+}
+
+TEST(SkillTurnPlanTest, AlwaysDoesNotConsumeRecallTopKOrDuplicateCanonicalInstructions) {
+    skill::InMemorySkillRegistry registry;
+    auto always = Manifest("always");
+    always.exposure = skill::ToolExposure::Always;
+    ASSERT_TRUE(registry.Register(always).ok());
+    ASSERT_TRUE(registry.Register(Manifest("first")).ok());
+    ASSERT_TRUE(registry.Register(Manifest("second")).ok());
+    persona::VectorToolMemoryProviderOptions options;
+    options.enable_vector = false;
+    options.top_k = 1;
+    options.keyword_triggers = {{"first", "poisoned description", "{}", {"q"}, {}},
+        {"second", "second", "{}", {"q"}, {}}};
+    persona::VectorToolMemoryProvider provider(nullptr, nullptr, nullptr, options);
+    auto recalled = provider.Query({.query = "q"});
+    ASSERT_TRUE(recalled.ok());
+    ASSERT_EQ(recalled.value().hits.size(), 1u);
+    EXPECT_EQ(recalled.value().degraded_reasons, std::vector<std::string>{"recall_top_k_truncated"});
+    auto plan = skill::BuildSkillTurnPlan(registry, {{recalled.value().hits[0].tool_id, "1"}}, {}, "q");
+    ASSERT_TRUE(plan.ok());
+    ASSERT_EQ(plan.value().tools.size(), 2u);
+    EXPECT_EQ(plan.value().tools[0].name, "always");
+    EXPECT_EQ(plan.value().tools[1].description, "canonical description");
+    auto duplicate = skill::BuildSkillTurnPlan(registry, {{"always", "1"}, {"always", "1"}}, {}, "q");
+    ASSERT_TRUE(duplicate.ok());
+    EXPECT_EQ(duplicate.value().tools.size(), 1u);
+}
+
+TEST(SkillTurnPlanTest, PrefetchRequiresReadonlyRegistrationAndTrustedBinder) {
+    auto manifest = Manifest("lookup");
+    manifest.execution = skill::ToolExecution::Prefetch;
+    EXPECT_FALSE(skill::ValidateManifest(manifest).ok());
+    manifest.read_only = true;
+    skill::InMemorySkillRegistry registry;
+    ASSERT_TRUE(registry.Register(manifest).ok());
+    EXPECT_FALSE(skill::BuildSkillTurnPlan(registry, {{"lookup", "1"}}, {}, "q").ok());
+    skill::SkillToolCallContext context;
+    context.policy = std::make_shared<Policy>();
+    auto plan = skill::BuildSkillTurnPlan(registry, {{"lookup", "1"}}, context, "quoted \"query\"");
+    ASSERT_TRUE(plan.ok());
+    ASSERT_EQ(plan.value().prefetch.tool_calls.size(), 1u);
+    EXPECT_EQ(nlohmann::json::parse(plan.value().prefetch.tool_calls[0].arguments_json)["query"], "quoted \"query\"");
+    EXPECT_FALSE(skill::ValidateSkillRequirements(plan.value()).ok());
+    skill::SkillResult result;
+    result.call_id = plan.value().prefetch.tool_calls[0].id;
+    result.skill_id = "lookup";
+    result.result_json = R"({"error":"a business field, not control failure"})";
+    std::vector<agent::llm::ChatMessage> messages{skill::MakeToolResultMessage(result, skill::ToolResultFormat::EnvelopeV1)};
+    ASSERT_TRUE(skill::AcceptSkillToolResults(plan.value(), plan.value().prefetch, messages).ok());
+    EXPECT_TRUE(skill::ValidateSkillRequirements(plan.value()).ok());
+    result.status = core::Status::Error(core::ErrorCode::ResourceExhausted, "tool result budget");
+    messages[0] = skill::MakeToolResultMessage(result, skill::ToolResultFormat::EnvelopeV1);
+    EXPECT_EQ(skill::AcceptSkillToolResults(plan.value(), plan.value().prefetch, messages).code(), core::ErrorCode::ResourceExhausted);
+}
+
+TEST(SkillTurnPlanTest, InvalidExposureAndConfirmationPrefetchAreRejectedAtRegistration) {
+    skill::InMemorySkillRegistry registry;
+    auto status = registry.RegisterJson(R"({"skill_id":"lookup","version":"1","exposure":"typo"})");
+    EXPECT_EQ(status.code(), core::ErrorCode::InvalidArgument);
+    status = registry.RegisterJson(R"({"skill_id":"lookup","version":"1","read_only":true,"execution":"prefetch","requires_confirmation":true,"executor":{"reference":"lookup"}})");
+    EXPECT_EQ(status.code(), core::ErrorCode::InvalidArgument);
+}
+
+TEST(SkillTurnPlanTest, ConflictingAlwaysVersionsFailInsteadOfChoosingRegistryIterationOrder) {
+    skill::InMemorySkillRegistry registry;
+    auto first = Manifest("lookup");
+    first.exposure = skill::ToolExposure::Always;
+    ASSERT_TRUE(registry.Register(first).ok());
+    auto second = first;
+    second.version = "2";
+    second.tool_name = "lookup_v2";
+    ASSERT_TRUE(registry.Register(second).ok());
+    EXPECT_EQ(skill::BuildSkillTurnPlan(registry, {}, {}, "q").status().code(), core::ErrorCode::FailedPrecondition);
 }
 
 TEST(ContextPlanTest, KeepsRequiredEvidenceDropsWholeOptionalRecordsAndReportsDuplicates) {

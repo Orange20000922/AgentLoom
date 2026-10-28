@@ -11,7 +11,7 @@
 - [Callback 生命周期与优雅停服](CALLBACK_LIFETIME_SHUTDOWN.md)
 - [Async gRPC Runtime](async_grpc_runtime.md)
 - [Skill 工具契约与可信 Turn 输入](SKILL_TOOL_CONTRACTS.md)
-- [记忆来源、上下文预算与工具生命周期](MEMORY_TOOL_RUNTIME.md)
+- [记忆上下文、必需工具与确定性预取](MEMORY_TOOL_RUNTIME.md)
 - [记忆与工具运行时验收](MEMORY_TOOL_ACCEPTANCE.md)
 - [GStreamer Windows Setup](../development/GSTREAMER_WINDOWS_SETUP.md)
 

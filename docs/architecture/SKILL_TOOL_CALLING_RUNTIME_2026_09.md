@@ -10,8 +10,8 @@
 当前契约见 [Skill 工具契约与可信 Turn 输入](../runtime/SKILL_TOOL_CONTRACTS.md)。
 该文同时列出 #18 尚未完成的异步 deadline、记忆数据边界和分来源预算，优先于本文早期描述。
 
-2026-10-29：规范召回、deadline 和来源预算契约见
-[记忆来源、上下文预算与工具生命周期](../runtime/MEMORY_TOOL_RUNTIME.md)。
+2026-10-29：工具暴露、只读预取、必调终态、deadline 和来源预算的新契约见
+[记忆上下文、必需工具与确定性预取](../runtime/MEMORY_TOOL_RUNTIME.md)。本文早期测试统计和缺陷清单保留为历史记录。
 
 ## 1. 实现现状
 

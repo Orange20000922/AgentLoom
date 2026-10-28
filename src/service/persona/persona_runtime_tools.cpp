@@ -24,6 +24,16 @@ agent::skill::SkillToolCallContext PersonaRuntime::ToolCallContext(
 
 core::Status PersonaRuntime::ResolveToolPlan(const SessionState& session,
     PreparedChat& prepared, const ToolMemoryContext& recalled) const {
+    if (options_.trusted_context_provider) {
+        auto trusted = options_.trusted_context_provider->GetContext({session.tenant_id, session.user_uuid,
+            session.session_id, session.persona_id, prepared.request.trace_id});
+        if (!trusted.ok()) return trusted.status();
+        for (auto& item : trusted.value()) {
+            item.source = ContextSource::Trusted;
+            item.required = true;
+            prepared.memory.items.push_back(std::move(item));
+        }
+    }
     if (!options_.skill_registry) return core::Status::Ok();
     std::vector<agent::skill::ToolRecallCandidate> candidates;
     for (const auto& hit : recalled.hits) candidates.push_back({hit.tool_id, hit.skill_version});
