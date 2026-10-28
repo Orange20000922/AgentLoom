@@ -22,9 +22,31 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
     if (prepared.cancel_requested && prepared.cancel_requested->load(std::memory_order_acquire)) {
         return core::Status::Error(core::ErrorCode::Cancelled, "persona turn cancelled by caller");
     }
+    if (!prepared.prefetch_done && !prepared.tool_plan.prefetch.tool_calls.empty()) {
+        if (!skill_tool_coordinator_) return core::Status::Error(core::ErrorCode::FailedPrecondition,
+            "prefetch requires a tool coordinator");
+        prepared.prefetch_done = true;
+        const auto context = ToolCallContext(session, prepared);
+        auto calls = prepared.tool_plan.prefetch;
+        auto holder = std::make_shared<std::function<void(core::Result<CompletedChat>)>>(std::move(completion));
+        return skill_tool_coordinator_->ExecuteAsync(calls, context,
+            [this, session = std::move(session), prepared = std::move(prepared), calls, holder](
+                core::Result<std::vector<llm::ChatMessage>> result) mutable {
+                if (!result.ok()) { (*holder)(result.status()); return; }
+                llm::ChatMessage assistant;
+                assistant.role = llm::ChatRole::Assistant;
+                assistant.tool_calls = calls.tool_calls;
+                prepared.messages.push_back(std::move(assistant));
+                if (auto status = AppendToolResults(prepared, calls, std::move(result).value()); !status.ok()) {
+                    (*holder)(status); return;
+                }
+                const auto status = CompleteWithLlmAsync(std::move(session), std::move(prepared), *holder);
+                if (!status.ok()) (*holder)(status);
+            });
+    }
     const auto io_stage_start = std::chrono::steady_clock::now();
     std::optional<AnswerCacheLookupRequest> answer_cache_lookup;
-    if (answer_cache_provider_ && !prepared.request.stream) {
+    if (answer_cache_provider_ && !prepared.request.stream && prepared.tool_plan.required_names.empty()) {
         const auto cache_start = std::chrono::steady_clock::now();
         prepared.answer_cache.enabled = true;
         AnswerCacheLookupRequest lookup;
@@ -76,7 +98,8 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
         };
         auto pending = std::make_shared<PendingText>();
         const bool defer_text = !request.tools.empty() && prepared.tool_round == 0;
-        stream_sink = [sink = prepared.request.event_sink, pending, defer_text,
+        const bool requirements_pending = !agent::skill::ValidateSkillRequirements(prepared.tool_plan).ok();
+        stream_sink = [sink = prepared.request.event_sink, pending, defer_text, requirements_pending,
                        generation = prepared.request.trace_id + ":generation:" + std::to_string(prepared.tool_round)](
                           const llm::LlmStreamEvent& source) {
             auto event = source;
@@ -91,7 +114,7 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
             }
             if (event.kind == llm::LlmStreamEventKind::ToolCallProgress) pending->saw_tools = true;
             if (event.kind == llm::LlmStreamEventKind::OutputItemCompleted) {
-                if (!pending->saw_tools) {
+                if (!pending->saw_tools && !requirements_pending) {
                     for (const auto& text : pending->events)
                         if (auto status = sink(text); !status.ok()) return status;
                 }
@@ -101,6 +124,7 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
         };
     }
     const auto llm_started_at = std::chrono::steady_clock::now();
+    ObservePrompt(prepared);
     std::uint64_t operation_id = 0;
     {
         std::lock_guard lock(async_operations_mutex_);
@@ -143,6 +167,7 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
             } cleanup{this, operation_id};
             auto result_holder = std::make_shared<core::Result<llm::ChatCompletionResponse>>(
                 std::move(result));
+            ObserveLlmResult(prepared, result_holder->ok() ? &result_holder->value() : nullptr, result_holder->status());
             auto finalize = [this,
                              session = std::move(session),
                              prepared = std::move(prepared),
@@ -185,28 +210,14 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                     assistant.tool_calls = llm_completion.tool_calls;
                     prepared_value.messages.push_back(std::move(assistant));
                     prepared_value.tool_round = 1;
-                    const auto skill_context = agent::skill::SkillToolCallContext{
-                        session.session_id,
-                        session.user_uuid,
-                        session.persona_id,
-                        prepared_value.request.trace_id,
-                        std::chrono::seconds(30),
-                        [&prepared_value] {
-                            std::vector<std::string> names;
-                            names.reserve(prepared_value.tools.size());
-                            for (const auto& tool : prepared_value.tools) names.push_back(tool.name);
-                            return names;
-                        }(),
-                        options_.max_tool_result_bytes,
-                        options_.tool_result_format,
-                        options_.skill_tool_policy};
+                    const auto skill_context = ToolCallContext(session, prepared_value);
                     auto completion_holder =
                         std::make_shared<std::function<void(core::Result<CompletedChat>)>>(
                             std::move(completion));
                     auto follow_up = [this,
                                       session = std::move(session),
                                       prepared = std::move(prepared_value),
-                                      completion_holder](
+                                      calls = llm_completion, completion_holder](
                                          core::Result<std::vector<llm::ChatMessage>> tool_messages) mutable {
                         if (prepared.request.stream) {
                             auto status = prepared.request.event_sink({
@@ -219,10 +230,12 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                             (*completion_holder)(tool_messages.status());
                             return;
                         }
-                        prepared.messages.insert(
-                            prepared.messages.end(),
-                            std::make_move_iterator(tool_messages.value().begin()),
-                            std::make_move_iterator(tool_messages.value().end()));
+                        if (auto status = AppendToolResults(prepared, calls, std::move(tool_messages).value()); !status.ok()) {
+                            (*completion_holder)(status); return;
+                        }
+                        if (auto status = CheckToolRequirements(prepared); !status.ok()) {
+                            (*completion_holder)(status); return;
+                        }
                         if (auto budget = ValidatePromptCharacterBudget(
                                 prepared.messages, prepared.tools, session.session_id,
                                 prepared.request.trace_id); !budget.ok()) {
@@ -247,6 +260,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                     completion(core::Status::Error(core::ErrorCode::FailedPrecondition,
                                                    "tool loop budget exhausted or coordinator missing"));
                     return;
+                }
+                if (auto status = CheckToolRequirements(prepared_value); !status.ok()) {
+                    completion(status); return;
                 }
                 auto completion_holder =
                     std::make_shared<std::function<void(core::Result<CompletedChat>)>>(

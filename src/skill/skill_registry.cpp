@@ -6,6 +6,7 @@
 #include <mutex>
 #include <regex>
 #include <unordered_set>
+#include <algorithm>
 
 namespace agent::skill {
 
@@ -41,7 +42,7 @@ core::Status ValidateManifest(const SkillManifest& manifest) {
             return core::Status::Error(core::ErrorCode::InvalidArgument,
                                        "skill schemas must be JSON objects");
         }
-    } catch (const nlohmann::json::exception& error) {
+    } catch (const std::exception& error) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    std::string("invalid skill schema: ") + error.what());
     }
@@ -126,7 +127,7 @@ core::Status InMemorySkillRegistry::RegisterJson(std::string_view manifest_json)
             return core::Status::Error(core::ErrorCode::InvalidArgument, "skill manifest must be an object");
         }
         return Register(ParseSkillManifestJson(body));
-    } catch (const nlohmann::json::exception& error) {
+    } catch (const std::exception& error) {
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    std::string("invalid skill manifest JSON: ") + error.what());
     }
@@ -140,10 +141,14 @@ core::Result<std::optional<SkillManifest>> InMemorySkillRegistry::Find(
         if (it == manifests_.end()) return std::optional<SkillManifest>{};
         return std::optional<SkillManifest>{it->second};
     }
+    std::optional<SkillManifest> found;
     for (const auto& [key, manifest] : manifests_) {
-        if (manifest.skill_id == skill_id) return std::optional<SkillManifest>{manifest};
+        if (manifest.skill_id != skill_id) continue;
+        if (found) return core::Status::Error(core::ErrorCode::FailedPrecondition,
+            "multiple skill versions require an explicit version");
+        found = manifest;
     }
-    return std::optional<SkillManifest>{};
+    return found;
 }
 
 core::Result<SkillManifest> InMemorySkillRegistry::Require(
@@ -162,6 +167,16 @@ core::Result<SkillManifest> InMemorySkillRegistry::RequireByToolName(std::string
         if (manifest.tool_name == tool_name) return manifest;
     }
     return core::Status::Error(core::ErrorCode::NotFound, "skill tool name not found");
+}
+
+core::Result<std::vector<SkillManifest>> InMemorySkillRegistry::List() const {
+    std::shared_lock lock(mutex_);
+    std::vector<SkillManifest> result;
+    for (const auto& [_, manifest] : manifests_) result.push_back(manifest);
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.skill_id < b.skill_id;
+    });
+    return result;
 }
 
 std::string InMemorySkillRegistry::Key(std::string_view skill_id, std::string_view version) {

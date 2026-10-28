@@ -234,12 +234,19 @@ if(BERT_BUILD_TESTS)
     copy_runtime_files(memory_tests "${BERT_SQLITE_DLL}")
 
     gtest_discover_tests(memory_tests DISCOVERY_MODE PRE_TEST)
+    # 来源契约回归独立于 Redis/真实模型，CI 不需要启用存储集成测试。
+    add_executable(memory_fact_codec_tests tests/memory/l3_fact_codec_test.cpp)
+    target_link_libraries(memory_fact_codec_tests PRIVATE agent_memory GTest::gtest_main)
+    copy_runtime_files(memory_fact_codec_tests "${BERT_SQLITE_DLL}")
+    gtest_discover_tests(memory_fact_codec_tests DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci\;unit\;memory")
 endif()
 
 # ──────────── Long-term memory (L3 compression) ────────────
 add_library(agent_memory STATIC
     src/memory/long_term_memory_compressor.h
     src/memory/long_term_memory_compressor.cpp
+    src/memory/l3_fact_codec.cpp
 )
 
 target_include_directories(agent_memory PUBLIC

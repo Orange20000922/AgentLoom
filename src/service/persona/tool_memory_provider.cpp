@@ -92,6 +92,11 @@ core::Result<ToolMemoryContext> VectorToolMemoryProvider::Query(const ToolMemory
     if (options_.enable_vector) {
         auto vector_hits = VectorHits(request.query);
         if (!vector_hits.ok()) {
+            if (!hits.empty()) {
+                auto context = BuildContext(std::move(hits));
+                context.degraded_reasons.push_back("vector_recall_unavailable");
+                return context;
+            }
             return vector_hits.status();
         }
         hits.insert(hits.end(), std::make_move_iterator(vector_hits.value().begin()), std::make_move_iterator(vector_hits.value().end()));
@@ -108,6 +113,21 @@ core::Status IToolMemoryProvider::QueryAsync(ToolMemoryQuery request,
     }
     completion(Query(request));
     return core::Status::Ok();
+}
+
+core::Status VectorToolMemoryProvider::ConfigureAsync(core::ThreadPool& compute, core::ThreadPool& io) {
+    if (embedding_batch_ || !options_.enable_vector || !embedding_pipeline_) return core::Status::Ok();
+    ::vector::EmbeddingBatchCoordinatorOptions options;
+    options.completion_pool = &io;
+    embedding_batch_ = std::make_shared<::vector::EmbeddingBatchCoordinator>(compute,
+        std::make_shared<::vector::EmbeddingPipelineBatchProvider>(embedding_pipeline_), options);
+    return core::Status::Ok();
+}
+core::Status VectorToolMemoryProvider::StartAsync() {
+    return embedding_batch_ ? embedding_batch_->Start() : core::Status::Ok();
+}
+void VectorToolMemoryProvider::ShutdownAsync() noexcept {
+    if (embedding_batch_) embedding_batch_->Shutdown();
 }
 
 core::Status VectorToolMemoryProvider::QueryAsync(ToolMemoryQuery request,
@@ -131,12 +151,22 @@ core::Status VectorToolMemoryProvider::QueryAsync(ToolMemoryQuery request,
                                     completion = std::move(completion)](
                                        core::Result<std::vector<float>> embedding) mutable {
         if (!embedding.ok()) {
-            completion(embedding.status());
+            if (!regex_hits.empty()) {
+                auto context = BuildContext(std::move(regex_hits));
+                context.degraded_reasons.push_back("embedding_unavailable");
+                completion(std::move(context));
+            }
+            else completion(embedding.status());
             return;
         }
         auto vector_hits = VectorHitsFromEmbedding(embedding.value());
         if (!vector_hits.ok()) {
-            completion(vector_hits.status());
+            if (!regex_hits.empty()) {
+                auto context = BuildContext(std::move(regex_hits));
+                context.degraded_reasons.push_back("vector_recall_unavailable");
+                completion(std::move(context));
+            }
+            else completion(vector_hits.status());
             return;
         }
         auto hits = regex_hits;
@@ -150,6 +180,7 @@ core::Status VectorToolMemoryProvider::QueryAsync(ToolMemoryQuery request,
 }
 
 ToolMemoryContext VectorToolMemoryProvider::BuildContext(std::vector<ToolMemoryHit> hits) const {
+    ToolMemoryContext context;
     std::unordered_set<std::string> seen;
     std::vector<ToolMemoryHit> deduped;
     for (auto& hit : hits) {
@@ -165,10 +196,11 @@ ToolMemoryContext VectorToolMemoryProvider::BuildContext(std::vector<ToolMemoryH
         return lhs.score > rhs.score;
     });
     if (deduped.size() > static_cast<std::size_t>(std::max(1, options_.top_k))) {
-        deduped.resize(static_cast<std::size_t>(options_.top_k));
+        deduped.resize(static_cast<std::size_t>(std::max(1, options_.top_k)));
+        context.degraded_reasons.push_back("recall_top_k_truncated");
     }
 
-    ToolMemoryContext context;
+    if (deduped.empty()) context.degraded_reasons.push_back("recall_empty");
     context.hit = !deduped.empty();
     context.prompt_block = BuildPromptBlock(deduped);
     for (const auto& hit : deduped) {
@@ -264,6 +296,7 @@ core::Result<std::vector<ToolMemoryHit>> VectorToolMemoryProvider::VectorHitsFro
         try {
             auto meta = Json::parse(entry.extra_metadata_json.empty() ? "{}" : entry.extra_metadata_json);
             hit.tool_id = JsonString(meta, "tool_id");
+            hit.skill_version = JsonString(meta, "version");
             hit.schema_json = JsonString(meta, "schema", JsonString(meta, "schema_json"));
             hit.priority = JsonInt(meta, "priority", 0);
             const auto instruction = JsonString(meta, "instruction");

@@ -444,4 +444,47 @@ TEST(GatewayToolCallingStreamingTest, HidesFirstRoundTextDistinguishesGeneration
     harness.CheckFollowUp(true);
 }
 
+TEST(GatewayToolCallingShutdownTest, HangingToolCancelsAndLateResultDoesNotReenterRuntime) {
+    class HangingExecutor final : public skill::ISkillExecutor {
+    public:
+        core::Result<persona::SkillSessionSnapshot> Start(const skill::SkillExecutionRequest&,
+            skill::SkillExecutionCallbacks callbacks) override {
+            result = std::move(callbacks.on_result);
+            started.set_value();
+            return persona::SkillSessionSnapshot{};
+        }
+        core::Status Cancel(std::string_view) override { ++cancelled; return core::Status::Ok(); }
+        std::promise<void> started;
+        std::function<void(skill::SkillResult)> result;
+        std::atomic<int> cancelled{0};
+    };
+    Harness harness;
+    auto executor = std::make_shared<HangingExecutor>();
+    auto started = executor->started.get_future();
+    auto factory = std::make_shared<skill::InMemorySkillExecutorFactory>();
+    ASSERT_TRUE(factory->RegisterReference("native", kSkill, executor).ok());
+    auto dependencies = harness.Dependencies(true);
+    dependencies.skill_executor_factory = factory;
+    gateway::PersonaGatewayServer server(harness.Options(), dependencies);
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.message = "lookup";
+    std::promise<core::ErrorCode> completed;
+    auto future = completed.get_future();
+    std::atomic<int> callbacks{0};
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) {
+        if (callbacks.fetch_add(1) == 0) completed.set_value(result.status().code());
+    }).ok());
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    server.Stop();
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(future.get(), core::ErrorCode::Cancelled);
+    EXPECT_EQ(executor->cancelled, 1);
+    executor->result(skill::SkillResult{});
+    EXPECT_EQ(callbacks, 1);
+}
+
 }

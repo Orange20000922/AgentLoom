@@ -343,6 +343,18 @@ void PersonaGatewayConfigSection::LoadJson(const Json& root, MultimodalServerOpt
     SetSize(*section, Name(), "runtime_recent_raw_turns", options.persona_gateway.runtime_recent_raw_turns, 1);
     SetSize(*section, Name(), "runtime_max_prompt_characters",
             options.persona_gateway.runtime_max_prompt_characters, 1);
+    if (const Json* budgets = FindField(*section, Name(), "context_budgets")) {
+        if (!budgets->is_object()) throw std::runtime_error("context_budgets must be an object");
+        constexpr const char* names[] = {"l0", "l3", "l4", "observation", "trusted", "legacy", "tool_result"};
+        for (std::size_t i = 0; i < std::size(names); ++i) {
+            const Json* budget = FindField(*budgets, "context_budgets", names[i]);
+            if (!budget) continue;
+            if (!budget->is_object()) throw std::runtime_error("context budget must be an object");
+            auto& value = options.persona_gateway.runtime_context_budgets[i];
+            SetSize(*budget, names[i], "max_bytes", value.max_bytes, 1);
+            SetBool(*budget, names[i], "allow_drop_optional", value.allow_drop_optional);
+        }
+    }
     SetString(*section, Name(), "runtime_default_model", options.persona_gateway.runtime_default_model);
     if (const Json* streaming = FindField(*section, Name(), "streaming")) {
         if (!streaming->is_object()) throw std::runtime_error("persona_gateway.streaming must be an object");

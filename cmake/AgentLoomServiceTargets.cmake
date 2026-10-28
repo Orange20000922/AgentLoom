@@ -26,6 +26,10 @@ add_library(agent_agent_runtime STATIC
     src/service/persona/gateway_session_affinity_scheduler.h
     src/service/persona/persona_runtime.cpp
     src/service/persona/persona_runtime_llm_async.cpp
+    src/service/persona/persona_runtime_tools.cpp
+    src/service/persona/semantic_memory_context_provider.cpp
+    src/service/persona/context_plan.cpp
+    src/service/persona/context_plan.h
     src/service/persona/persona_runtime.h
     src/service/persona/skill_session_manager.cpp
     src/service/persona/skill_session_manager.h
@@ -39,6 +43,10 @@ add_library(agent_agent_runtime STATIC
     src/skill/skill_prompt_compiler.cpp
     src/skill/skill_executor.h
     src/skill/skill_executor.cpp
+    src/skill/skill_deadline.h
+    src/skill/skill_deadline.cpp
+    src/skill/skill_turn_plan.h
+    src/skill/skill_turn_plan.cpp
     src/service/persona/emotion_fusion_analyzer.cpp
     src/service/persona/emotion_fusion_analyzer.h
     src/service/persona/grpc_emotion_analyzer.cpp
@@ -380,8 +388,13 @@ if(BERT_BUILD_TESTS)
         tests/service/semantic_memory_context_provider_test.cpp
         tests/service/emotion_fusion_analyzer_test.cpp
         tests/service/skill_registry_test.cpp
+        tests/service/skill_turn_plan_test.cpp
         tests/service/skill_prompt_compiler_test.cpp
     )
+    add_executable(context_plan_benchmark tests/service/context_plan_benchmark.cpp)
+    target_link_libraries(context_plan_benchmark PRIVATE agent_agent_runtime)
+    add_test(NAME ContextPlanBenchmark.Smoke COMMAND context_plan_benchmark)
+    set_tests_properties(ContextPlanBenchmark.Smoke PROPERTIES LABELS "ci;benchmark")
 
     target_link_libraries(persona_runtime_tests PRIVATE
         agent_agent_runtime

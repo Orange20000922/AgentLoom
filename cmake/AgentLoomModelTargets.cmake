@@ -118,7 +118,6 @@ if(BERT_BUILD_TESTS)
         tests/vector/embedding_batch_coordinator_test.cpp
         tests/vector/vlm_vector_cache_test.cpp
         tests/vector/vector_index_test.cpp
-        tests/vector/vector_index_manager_test.cpp
     )
 
     target_link_libraries(vector_tests PRIVATE
@@ -136,6 +135,16 @@ if(BERT_BUILD_TESTS)
     endforeach()
 
     gtest_discover_tests(vector_tests DISCOVERY_MODE PRE_TEST)
+    # 索引管理器使用临时 SQLite 与确定性向量，不依赖 embedding 模型文件。
+    add_executable(vector_index_manager_tests tests/vector/vector_index_manager_test.cpp)
+    target_link_libraries(vector_index_manager_tests PRIVATE agent_vector agent_storage GTest::gtest_main)
+    copy_runtime_files(vector_index_manager_tests ${BERT_FAISS_RUNTIME_FILES})
+    copy_runtime_files(vector_index_manager_tests "${BERT_SQLITE_DLL}")
+    foreach(_ort_lib ${VECTOR_TESTS_ONNXRUNTIME_LIBS})
+        copy_runtime_files(vector_index_manager_tests "${_ort_lib}")
+    endforeach()
+    gtest_discover_tests(vector_index_manager_tests DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "ci\;unit\;vector")
 endif()
 
 if(AGENTLOOM_BUILD_TOOLS)

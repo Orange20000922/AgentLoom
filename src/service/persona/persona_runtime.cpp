@@ -10,24 +10,9 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <nlohmann/json.hpp>
 namespace agent::service::persona {
 namespace {
-std::string FormatRecentTurn(const ConversationTurn& turn) {
-    return "用户: " + turn.user_input + "\n助手: " + turn.response;
-}
-std::string FormatL3Facts(const std::vector<vector_storage::EntryRecord>& facts) {
-    if (facts.empty()) {
-        return {};
-    }
-    std::string out = "<memory_l3>\n";
-    for (const auto& fact : facts) {
-        if (!fact.payload.empty()) {
-            out += "- " + fact.payload + "\n";
-        }
-    }
-    out += "</memory_l3>";
-    return out;
-}
 core::Result<std::size_t> PromptRequestCharacters(
     const std::vector<llm::ChatMessage>& messages,
     const std::vector<llm::ChatCompletionRequest::Tool>& tools) {
@@ -113,42 +98,6 @@ core::Status ValidateEmotionGenerationOptions(const EmotionGenerationOptions& op
     }
     return core::Status::Ok();
 }
-std::vector<ConversationTurn> TakeRecent(std::span<const ConversationTurn> turns, std::size_t limit) {
-    std::vector<ConversationTurn> out;
-    const auto count = std::min<std::size_t>(turns.size(), limit);
-    out.reserve(count);
-    const auto begin = turns.size() - count;
-    for (std::size_t i = begin; i < turns.size(); ++i) {
-        out.push_back(turns[i]);
-    }
-    return out;
-}
-/// 将 provider 的同步完成、异步完成和异常实现统一收敛为一次外部结果。
-class MemoryBuildCompletionState final {
-public:
-    explicit MemoryBuildCompletionState(
-        IAsyncMemoryContextProvider::BuildCompletion completion)
-        : completion_(std::move(completion)) {}
-    bool TryComplete(core::Result<RecalledContext> result) {
-        bool expected = false;
-        if (!completed_.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            return false;
-        }
-        // 状态可能被下游缓存持有；先移出回调，确保完成后及时释放 Runtime/session 捕获。
-        auto completion = std::move(completion_);
-        completion(std::move(result));
-        return true;
-    }
-    bool CancelWithoutCompletion() noexcept {
-        bool expected = false;
-        return completed_.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel);
-    }
-private:
-    std::atomic<bool> completed_{false};
-    IAsyncMemoryContextProvider::BuildCompletion completion_;
-};
 double TopProbabilityMargin(const EmotionInfo& emotion) {
     if (emotion.probabilities.size() < 2) {
         return 1.0;
@@ -220,293 +169,6 @@ std::string FormatSkillPromptBlock(const SkillSessionSnapshot& snapshot) {
     return out;
 }
 } // namespace
-SemanticMemoryContextProvider::SemanticMemoryContextProvider(
-    std::shared_ptr<semantic_cache::ISemanticCache> l0_cache,
-    std::shared_ptr<memory::LongTermMemoryCompressor> l3_memory,
-    SemanticMemoryContextProviderOptions options)
-    : l0_cache_(std::move(l0_cache)),
-      l3_memory_(std::move(l3_memory)),
-      options_(options) {}
-core::Result<RecalledContext> SemanticMemoryContextProvider::BuildContext(
-    const MemoryContextRequest& request) {
-    RecalledContext context;
-    const auto recent_limit = request.max_recent_turns == 0
-        ? options_.max_recent_turns
-        : request.max_recent_turns;
-    context.recent_turns = TakeRecent(request.current_session_recent, recent_limit);
-    std::vector<std::string> sections;
-    if (l0_cache_) {
-        semantic_cache::CacheLookupRequest lookup;
-        lookup.text = request.query;
-        lookup.scope = semantic_cache::CacheScope::User;
-        lookup.answer_type = semantic_cache::AnswerType::Personalized;
-        lookup.tenant_id = request.tenant_id;
-        lookup.user_id = request.user_uuid;
-        lookup.session_id = request.session_id;
-        lookup.persona_id = request.persona_id;
-        lookup.extra["trace_id"] = request.trace_id;
-        lookup.recent_turns.reserve(context.recent_turns.size());
-        lookup.recent_turn_ids.reserve(context.recent_turns.size());
-        for (const auto& turn : context.recent_turns) {
-            lookup.recent_turns.push_back(FormatRecentTurn(turn));
-            lookup.recent_turn_ids.push_back(turn.turn_id);
-        }
-        auto l0 = l0_cache_->Lookup(lookup);
-        if (!l0.ok()) {
-            return l0.status();
-        }
-        if (l0.value().hit && !l0.value().payload.empty()) {
-            context.l0_hit = true;
-            sections.push_back("<memory_l0>\n" + l0.value().payload + "\n</memory_l0>");
-        }
-    }
-    if (l3_memory_) {
-        auto facts = l3_memory_->SearchFacts(
-            {request.tenant_id, request.user_uuid}, request.query, options_.l3_top_k);
-        if (!facts.ok()) {
-            return facts.status();
-        }
-        auto formatted = FormatL3Facts(facts.value());
-        if (!formatted.empty()) {
-            context.l3_hit = true;
-            sections.push_back(std::move(formatted));
-        }
-    }
-    for (std::size_t i = 0; i < sections.size(); ++i) {
-        if (i != 0) {
-            context.system_context += "\n";
-        }
-        context.system_context += sections[i];
-    }
-    return context;
-}
-core::Status SemanticMemoryContextProvider::BuildContextAsync(
-    AsyncMemoryContextRequest request,
-    BuildCompletion completion) {
-    if (!completion) {
-        return core::Status::Error(core::ErrorCode::InvalidArgument,
-                                   "memory context completion is required");
-    }
-    RecalledContext context;
-    const auto recent_limit = request.max_recent_turns == 0
-        ? options_.max_recent_turns
-        : request.max_recent_turns;
-    context.recent_turns = TakeRecent(request.current_session_recent, recent_limit);
-    auto completion_state = std::make_shared<MemoryBuildCompletionState>(
-        std::move(completion));
-    const auto l3_memory = l3_memory_;
-    const auto l3_top_k = options_.l3_top_k;
-    const auto user_uuid = request.user_uuid;
-    const auto query = request.query;
-    auto complete_remaining =
-        [l3_memory, l3_top_k, tenant_id = request.tenant_id, user_uuid, query, completion_state](
-            RecalledContext value) mutable {
-            std::vector<std::string> sections;
-            if (!value.system_context.empty()) {
-                sections.push_back(std::move(value.system_context));
-            }
-            if (l3_memory) {
-                auto facts = l3_memory->SearchFacts(
-                    {tenant_id, user_uuid}, query, l3_top_k);
-                if (!facts.ok()) {
-                    completion_state->TryComplete(facts.status());
-                    return;
-                }
-                auto formatted = FormatL3Facts(facts.value());
-                if (!formatted.empty()) {
-                    value.l3_hit = true;
-                    sections.push_back(std::move(formatted));
-                }
-            }
-            value.system_context.clear();
-            for (std::size_t index = 0; index < sections.size(); ++index) {
-                if (index != 0) {
-                    value.system_context += "\n";
-                }
-                value.system_context += sections[index];
-            }
-            completion_state->TryComplete(std::move(value));
-        };
-    if (!l0_cache_) {
-        complete_remaining(std::move(context));
-        return core::Status::Ok();
-    }
-    auto async_l0 = std::dynamic_pointer_cast<semantic_cache::IAsyncSemanticCache>(l0_cache_);
-    if (!async_l0) {
-        MemoryContextRequest sync_request;
-        sync_request.session_id = request.session_id;
-        sync_request.tenant_id = request.tenant_id;
-        sync_request.user_uuid = request.user_uuid;
-        sync_request.persona_id = request.persona_id;
-        sync_request.query = request.query;
-        sync_request.trace_id = request.trace_id;
-        sync_request.current_session_recent = request.current_session_recent;
-        sync_request.max_recent_turns = request.max_recent_turns;
-        completion_state->TryComplete(BuildContext(sync_request));
-        return core::Status::Ok();
-    }
-    semantic_cache::CacheLookupRequest lookup;
-    lookup.text = request.query;
-    lookup.scope = semantic_cache::CacheScope::User;
-    lookup.answer_type = semantic_cache::AnswerType::Personalized;
-    lookup.tenant_id = request.tenant_id;
-    lookup.user_id = request.user_uuid;
-    lookup.session_id = request.session_id;
-    lookup.persona_id = request.persona_id;
-    lookup.extra["trace_id"] = request.trace_id;
-    lookup.recent_turns.reserve(context.recent_turns.size());
-    lookup.recent_turn_ids.reserve(context.recent_turns.size());
-    for (const auto& turn : context.recent_turns) {
-        lookup.recent_turns.push_back(FormatRecentTurn(turn));
-        lookup.recent_turn_ids.push_back(turn.turn_id);
-    }
-    core::Status start_status;
-    try {
-        start_status = async_l0->LookupAsync(
-            std::move(lookup),
-            [context = std::move(context),
-             complete_remaining = std::move(complete_remaining),
-             completion_state](
-                core::Result<semantic_cache::CacheLookupResult> l0) mutable {
-                if (!l0.ok()) {
-                    completion_state->TryComplete(l0.status());
-                    return;
-                }
-                if (l0.value().hit && !l0.value().payload.empty()) {
-                    context.l0_hit = true;
-                    context.system_context =
-                        "<memory_l0>\n" + l0.value().payload + "\n</memory_l0>";
-                }
-                complete_remaining(std::move(context));
-            });
-    } catch (const std::exception& exception) {
-        start_status = core::Status::Error(core::ErrorCode::InternalError, exception.what());
-    } catch (...) {
-        start_status = core::Status::Error(
-            core::ErrorCode::Unknown,
-            "async semantic cache threw an unknown exception");
-    }
-    if (!start_status.ok()) {
-        // 若下游违反契约并在返回失败前同步回调，以已完成结果为准，避免上层二次 finish。
-        if (!completion_state->CancelWithoutCompletion()) {
-            return core::Status::Ok();
-        }
-    }
-    return start_status;
-}
-core::Status SemanticMemoryContextProvider::AdmitTurnAsync(
-    std::string session_id,
-    std::string tenant_id,
-    std::string user_uuid,
-    ConversationTurn turn,
-    std::string trace_id,
-    AdmissionCompletion completion) {
-    if (!completion) {
-        return core::Status::Error(core::ErrorCode::InvalidArgument,
-                                   "memory admission completion is required");
-    }
-    if (!l0_cache_) {
-        return core::Status::Error(core::ErrorCode::FailedPrecondition,
-                                   "L0 memory cache is not initialized");
-    }
-    const memory::MemoryOwner owner{tenant_id, user_uuid};
-    auto async_l0 = std::dynamic_pointer_cast<semantic_cache::IAsyncSemanticCache>(l0_cache_);
-    if (!async_l0) {
-        return core::Status::Error(
-            core::ErrorCode::FailedPrecondition,
-            "asynchronous L0 memory admission is not supported");
-    }
-    semantic_cache::CacheStoreRequest store;
-    store.origin.text = turn.user_input;
-    store.origin.scope = semantic_cache::CacheScope::User;
-    store.origin.answer_type = semantic_cache::AnswerType::Personalized;
-    store.origin.tenant_id = std::move(tenant_id);
-    store.origin.user_id = std::move(user_uuid);
-    store.origin.session_id = std::move(session_id);
-    store.origin.persona_id = turn.persona_id;
-    store.origin.extra["trace_id"] = std::move(trace_id);
-    if (!turn.turn_id.empty()) store.origin.extra["turn_id"] = turn.turn_id;
-    store.response_payload = turn.response;
-    store.answer_type = semantic_cache::AnswerType::Personalized;
-    auto completion_state = std::make_shared<std::atomic<bool>>(false);
-    auto guarded_completion = [completion = std::move(completion), completion_state,
-                               l3_memory = l3_memory_, owner](
-                                  core::Status status) mutable {
-        bool expected = false;
-        if (!completion_state->compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            return;
-        }
-        if (status.ok() && l3_memory) {
-            status = l3_memory->RegisterOwner(owner);
-        }
-        try {
-            completion(std::move(status));
-        } catch (...) {
-            // Provider 回调不应将业务异常传播回存储 executor。
-        }
-    };
-    core::Status status;
-    try {
-        status = async_l0->StoreAsync(std::move(store), std::move(guarded_completion));
-    } catch (const std::exception& exception) {
-        status = core::Status::Error(core::ErrorCode::InternalError, exception.what());
-    } catch (...) {
-        status = core::Status::Error(
-            core::ErrorCode::Unknown,
-            "asynchronous semantic cache store threw an unknown exception");
-    }
-    if (!status.ok()) {
-        bool expected = false;
-        // 违反“失败不回调”契约时，以已交付完成为准，避免二次 admission 收口。
-        if (!completion_state->compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            return core::Status::Ok();
-        }
-    }
-    return status;
-}
-
-core::Status SemanticMemoryContextProvider::AdmitTurn(std::string_view session_id,
-                                                      std::string_view tenant_id,
-                                                      std::string_view user_uuid,
-                                                      const ConversationTurn& turn,
-                                                      std::string_view) {
-    if (!l0_cache_) {
-        return core::Status::Ok();
-    }
-
-    const memory::MemoryOwner owner{std::string(tenant_id), std::string(user_uuid)};
-    semantic_cache::CacheStoreRequest store;
-    store.origin.text = turn.user_input;
-    store.origin.scope = semantic_cache::CacheScope::User;
-    store.origin.answer_type = semantic_cache::AnswerType::Personalized;
-    store.origin.tenant_id = std::string(tenant_id);
-    store.origin.user_id = std::string(user_uuid);
-    store.origin.session_id = std::string(session_id);
-    store.origin.persona_id = turn.persona_id;
-    if (!turn.turn_id.empty()) store.origin.extra["turn_id"] = turn.turn_id;
-    store.origin.extra["emotion"] = turn.emotion;
-    store.origin.extra["intensity"] = std::to_string(turn.intensity);
-    store.origin.extra["behavior"] = turn.behavior;
-    store.origin.extra["tone"] = turn.tone;
-    store.origin.extra["context_id"] = turn.context_id;
-    if (turn.valence) {
-        store.origin.extra["valence"] = std::to_string(*turn.valence);
-    }
-    if (turn.arousal) {
-        store.origin.extra["arousal"] = std::to_string(*turn.arousal);
-    }
-    store.origin.extra["payload_type"] = "conversation_turn";
-    store.response_payload = turn.response;
-    store.answer_type = semantic_cache::AnswerType::Personalized;
-    auto status = l0_cache_->Store(store);
-    if (status.ok() && l3_memory_) {
-        status = l3_memory_->RegisterOwner(owner);
-    }
-    return status;
-}
-
 core::Result<EmotionAnalysis> NeutralEmotionAnalyzer::Analyze(std::string_view,
                                                               std::string_view,
                                                               std::shared_ptr<const PersonalityConfig>) {
@@ -611,6 +273,7 @@ struct PersonaRuntime::AsyncTurnOperation final {
     std::mutex completion_mutex;
     std::shared_ptr<std::atomic<bool>> cancel_requested =
         std::make_shared<std::atomic<bool>>(false);
+    std::stop_source cancellation;
     core::LoggerAdapter logger;
 };
 
@@ -688,6 +351,7 @@ core::Status PersonaRuntime::CancelAsyncTurn(std::string_view session_id,
         }
     }
     // 不持 Runtime 锁调用 Provider：Cancel 允许同步触发完成回调。
+    turn_operation->cancellation.request_stop();
     if (llm_operation) {
         llm_operation->Cancel();
     }
@@ -927,8 +591,17 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatBeforeEmot
     prepared.started_at = memory_start;
     prepared.request = std::move(request);
     prepared.memory = std::move(memory);
+    if (!prepared.memory.items.empty()) prepared.memory.system_context.clear();
+    else if (!prepared.memory.system_context.empty()) {
+        prepared.memory.items.push_back({ContextSource::Legacy, {}, std::move(prepared.memory.system_context)});
+        prepared.memory.system_context.clear();
+    }
     std::vector<std::string> triggered_skills;
-    if (tool_memory_provider_) {
+    ToolMemoryContext recalled_tools;
+    if (prepared.memory.tool_lookup_done && prepared.memory.recalled_tools) {
+        recalled_tools = std::move(*prepared.memory.recalled_tools);
+    }
+    if (tool_memory_provider_ && !prepared.memory.tool_lookup_done) {
         ToolMemoryQuery tool_query;
         tool_query.session_id = session.session_id;
         tool_query.user_uuid = session.user_uuid;
@@ -937,12 +610,13 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatBeforeEmot
         tool_query.query = prepared.request.user_input;
         auto tool_context = tool_memory_provider_->Query(tool_query);
         if (!tool_context.ok()) {
+            recalled_tools.degraded_reasons.push_back("recall_unavailable");
             logger_.warn("[trace={}] [persona_runtime] L4 tool memory skipped session={} reason={}",
                          prepared.request.trace_id,
                          session.session_id,
                          tool_context.status().message());
-        } else if (tool_context.value().hit && !tool_context.value().prompt_block.empty()) {
-            prepared.tools = tool_context.value().tools;
+        } else if (tool_context.value().hit && (options_.skill_registry || !tool_context.value().prompt_block.empty())) {
+            if (!options_.skill_registry) prepared.tools = tool_context.value().tools;
             for (const auto& hit : tool_context.value().hits) {
                 if (!hit.tool_id.empty() &&
                     StatefulSkillRegistry::Instance().Contains(hit.tool_id)) {
@@ -952,10 +626,25 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatBeforeEmot
             if (!prepared.memory.system_context.empty()) {
                 prepared.memory.system_context += "\n";
             }
-            prepared.memory.system_context += tool_context.value().prompt_block;
+            if (!options_.skill_registry) prepared.memory.items.push_back(
+                {ContextSource::L4, {}, tool_context.value().prompt_block});
             prepared.memory.l4_hit = true;
+            recalled_tools = std::move(tool_context).value();
+        } else {
+            recalled_tools = std::move(tool_context).value();
         }
     }
+    if (prepared.memory.tool_lookup_done && recalled_tools.hit) {
+        prepared.memory.l4_hit = true;
+        if (!options_.skill_registry) {
+            prepared.tools = recalled_tools.tools;
+            prepared.memory.items.push_back({ContextSource::L4, {}, recalled_tools.prompt_block});
+        }
+        for (const auto& hit : recalled_tools.hits) {
+            if (StatefulSkillRegistry::Instance().Contains(hit.tool_id)) triggered_skills.push_back(hit.tool_id);
+        }
+    }
+    if (auto status = ResolveToolPlan(session, prepared, recalled_tools); !status.ok()) return status;
     if (skill_session_manager_) {
         for (const auto& skill_id : triggered_skills) {
             SkillSessionStartRequest skill_start;
@@ -987,10 +676,19 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatBeforeEmot
                 if (!prepared.memory.system_context.empty()) {
                     prepared.memory.system_context += "\n";
                 }
-                prepared.memory.system_context += FormatSkillPromptBlock(skill);
+                prepared.memory.items.push_back({ContextSource::Observation, skill.skill_id,
+                    FormatSkillPromptBlock(skill), nlohmann::json{{"execution_id", skill.execution_id},
+                        {"source_role", "tool_observation"}, {"uncertainty", "unknown"}}.dump()});
             }
         }
     }
+    auto compiled = CompileContext(prepared.memory.items, options_.context_budgets, prepared.memory.budget_report);
+    logger_.info("[trace={}] context planned l0_bytes={} l3_bytes={} l4_bytes={} observation_bytes={} dropped={} duplicates={}",
+        prepared.request.trace_id, prepared.memory.budget_report.input_bytes[0], prepared.memory.budget_report.input_bytes[1],
+        prepared.memory.budget_report.input_bytes[2], prepared.memory.budget_report.input_bytes[3],
+        prepared.memory.budget_report.dropped_ids.size(), prepared.memory.budget_report.duplicate_ids.size());
+    if (!compiled.ok()) { ObserveTurn(prepared, compiled.status()); return compiled.status(); }
+    prepared.memory.system_context = std::move(compiled).value();
     prepared.latency.memory_context = Since(memory_start);
     logger_.info("[trace={}] [persona_runtime] memory context done session={} latency_ms={} l0_hit={} l3_hit={} l4_hit={}",
                  prepared.request.trace_id,
@@ -1056,7 +754,7 @@ core::Result<PersonaRuntime::PreparedChat> PersonaRuntime::PrepareChatAfterEmoti
     prepared.messages = std::move(messages).value();
     if (auto status = ValidatePromptCharacterBudget(
             prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
-        !status.ok()) return status;
+        !status.ok()) { ObserveTurn(prepared, status); return status; }
     prepared.latency.prompt_build = Since(prompt_start);
     logger_.info("[trace={}] [persona_runtime] prompt build done session={} latency_ms={} messages={}",
                  prepared.request.trace_id,
@@ -1170,12 +868,24 @@ core::Status PersonaRuntime::MaybeRecordEmotionCalibrationSample(
 
 core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session,
                                                             PreparedChat prepared) {
+    if (!prepared.tool_plan.prefetch.tool_calls.empty()) {
+        if (!skill_tool_coordinator_) return core::Status::Error(core::ErrorCode::FailedPrecondition,
+            "prefetch requires a tool coordinator");
+        auto results = skill_tool_coordinator_->Execute(prepared.tool_plan.prefetch, ToolCallContext(session, prepared));
+        if (!results.ok()) return results.status();
+        llm::ChatMessage assistant;
+        assistant.role = llm::ChatRole::Assistant;
+        assistant.tool_calls = prepared.tool_plan.prefetch.tool_calls;
+        prepared.messages.push_back(std::move(assistant));
+        if (auto status = AppendToolResults(prepared, prepared.tool_plan.prefetch, std::move(results).value()); !status.ok())
+            return status;
+    }
     const auto turn_user_input = prepared.request.user_input;
     const auto turn_context_id = prepared.request.context_id;
     const auto io_stage_start = std::chrono::steady_clock::now();
     std::optional<AnswerCacheLookupRequest> answer_cache_lookup;
     std::optional<AnswerCacheLookupResult> answer_cache_hit;
-    if (answer_cache_provider_ && !prepared.request.stream) {
+    if (answer_cache_provider_ && !prepared.request.stream && prepared.tool_plan.required_names.empty()) {
         const auto cache_start = std::chrono::steady_clock::now();
         prepared.answer_cache.enabled = true;
         AnswerCacheLookupRequest lookup;
@@ -1220,7 +930,9 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
         llm_req.tools = prepared.tools;
         if (!llm_req.tools.empty()) llm_req.tool_choice = "auto";
 
+        ObservePrompt(prepared);
         auto llm_result = llm_client_->Complete(llm_req);
+        ObserveLlmResult(prepared, llm_result.ok() ? &llm_result.value() : nullptr, llm_result.status());
         prepared.latency.llm_total = Since(llm_start);
         if (!llm_result.ok()) {
             return llm_result.status();
@@ -1239,30 +951,19 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
             prepared.messages.push_back(std::move(assistant));
             auto tool_messages = skill_tool_coordinator_->Execute(
                 completion,
-                agent::skill::SkillToolCallContext{
-                    session.session_id,
-                    session.user_uuid,
-                    session.persona_id,
-                    prepared.request.trace_id,
-                    std::chrono::seconds(30),
-                    [&prepared] {
-                        std::vector<std::string> names;
-                        names.reserve(prepared.tools.size());
-                        for (const auto& tool : prepared.tools) names.push_back(tool.name);
-                        return names;
-                    }(),
-                    options_.max_tool_result_bytes,
-                    options_.tool_result_format,
-                    options_.skill_tool_policy});
+                ToolCallContext(session, prepared));
             if (!tool_messages.ok()) return tool_messages.status();
-            prepared.messages.insert(prepared.messages.end(),
-                                     std::make_move_iterator(tool_messages.value().begin()),
-                                     std::make_move_iterator(tool_messages.value().end()));
+            if (auto status = AppendToolResults(prepared, completion, std::move(tool_messages).value()); !status.ok())
+                return status;
+            if (auto status = CheckToolRequirements(prepared); !status.ok()) return status;
             if (auto budget = ValidatePromptCharacterBudget(
                     prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
                 !budget.ok()) return budget;
             llm_req.messages = prepared.messages;
+            prepared.tool_round = 1;
+            ObservePrompt(prepared);
             auto follow_up = llm_client_->Complete(llm_req);
+            ObserveLlmResult(prepared, follow_up.ok() ? &follow_up.value() : nullptr, follow_up.status());
             if (!follow_up.ok()) return follow_up.status();
             completion = std::move(follow_up).value();
         }
@@ -1271,6 +972,7 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
                                        "tool loop budget exhausted or coordinator missing");
         }
     }
+    if (auto status = CheckToolRequirements(prepared); !status.ok()) return status;
     auto finalized = FinalizeLlmCompletion(
         session,
         std::move(prepared),
@@ -1412,8 +1114,41 @@ void PersonaRuntime::OnAsyncMemoryCompleted(
     const std::shared_ptr<AsyncTurnOperation>& operation,
     std::chrono::steady_clock::time_point memory_start,
     core::Result<RecalledContext> memory) noexcept {
+    if (memory.ok() && tool_memory_provider_ && !memory.value().tool_lookup_done) {
+        if (!operation->Transition(AsyncTurnPhase::MemoryLookupPending, AsyncTurnPhase::ToolLookupPending)) return;
+        try {
+        auto holder = std::make_shared<RecalledContext>(std::move(memory).value());
+        holder->tool_lookup_done = true;
+        ToolMemoryQuery query{operation->session.session_id, operation->session.user_uuid,
+            operation->session.persona_id, operation->request.trace_id, operation->request.user_input};
+        auto delivered = std::make_shared<std::atomic<bool>>(false);
+        auto complete = [this, operation, memory_start, holder, delivered](core::Result<ToolMemoryContext> tools) mutable {
+            if (delivered->exchange(true)) return;
+            if (tools.ok()) holder->recalled_tools = std::move(tools).value();
+            else {
+                holder->recalled_tools.emplace();
+                holder->recalled_tools->degraded_reasons.push_back("recall_unavailable");
+                logger_.warn("[trace={}] L4 recall degraded reason={}", operation->request.trace_id, tools.status().message());
+            }
+            OnAsyncMemoryCompleted(operation, memory_start, std::move(*holder));
+        };
+        try {
+            auto status = tool_memory_provider_->QueryAsync(std::move(query), complete);
+            if (!status.ok()) complete(status);
+        } catch (const std::exception& error) {
+            complete(core::Status::Error(core::ErrorCode::InternalError, error.what()));
+        }
+        return;
+        } catch (const std::exception& error) {
+            operation->Finish(core::Status::Error(core::ErrorCode::InternalError, error.what()));
+            return;
+        } catch (...) {
+            operation->Finish(core::Status::Error(core::ErrorCode::InternalError, "tool memory query failed"));
+            return;
+        }
+    }
     if (!operation->Transition(
-            AsyncTurnPhase::MemoryLookupPending,
+            memory.ok() && memory.value().tool_lookup_done ? AsyncTurnPhase::ToolLookupPending : AsyncTurnPhase::MemoryLookupPending,
             AsyncTurnPhase::Preparing)) {
         return;
     }
@@ -1519,6 +1254,7 @@ void PersonaRuntime::ContinueAsyncTurn(
         prepared.value().latency.compute_stage = Since(operation->compute_started_at);
         prepared.value().io_submitted_at = std::chrono::steady_clock::now();
         prepared.value().cancel_requested = operation->cancel_requested;
+        prepared.value().cancellation = operation->cancellation.get_token();
         auto status = CompleteWithLlmAsync(
             operation->session,
             std::move(prepared).value(),
@@ -1587,6 +1323,11 @@ void PersonaRuntime::OnAsyncLlmCompleted(
                 "[trace={}] [persona_runtime] async memory admission unavailable: {}",
                 operation->request.trace_id,
                 status.message());
+            if (status.code() != core::ErrorCode::Unimplemented) {
+                // 队列拒绝不能绕过背压；仅未装配异步能力的旧宿主保留同步兼容路径。
+                OnAsyncMemoryAdmissionCompleted(operation, std::move(*completed_holder), std::move(status));
+                return;
+            }
         }
         if (memory_provider_) {
             const ConversationTurn turn{
@@ -1695,9 +1436,13 @@ void PersonaRuntime::Shutdown() noexcept {
     std::lock_guard shutdown_lock(shutdown_mutex_);
     callback_lifetime_.CloseAdmission();
     std::vector<std::shared_ptr<llm::IAsyncLlmOperation>> operations;
+    std::vector<std::shared_ptr<AsyncTurnOperation>> turns;
     {
         std::lock_guard lock(async_operations_mutex_);
         async_stopping_ = true;
+        for (const auto& [_, weak] : async_turns_by_session_) {
+            if (auto turn = weak.lock()) turns.push_back(std::move(turn));
+        }
         operations.reserve(async_operations_.size());
         for (const auto& [_, record] : async_operations_) {
             if (record.llm_operation) {
@@ -1705,6 +1450,7 @@ void PersonaRuntime::Shutdown() noexcept {
             }
         }
     }
+    for (const auto& turn : turns) turn->cancellation.request_stop();
     for (const auto& operation : operations) {
         operation->Cancel();
     }
@@ -1882,6 +1628,16 @@ PersonaRuntime::FinalizeLlmCompletionAfterEmotion(
     response.prompt_tokens = prepared.prompt_tokens + completion.prompt_tokens;
     response.completion_tokens = prepared.completion_tokens + completion.completion_tokens;
     response.total_tokens = prepared.total_tokens + completion.total_tokens;
+    response.context_budget = prepared.memory.budget_report;
+    response.required_tools = prepared.tool_plan.required_names;
+    response.satisfied_tools = prepared.tool_plan.satisfied_names;
+    response.degraded_reasons = prepared.tool_plan.degraded_reasons;
+    response.tools_recalled = prepared.tool_plan.recalled_ids;
+    for (const auto& call : prepared.llm_calls)
+        response.tool_calls.insert(response.tool_calls.end(), call.tool_calls.begin(), call.tool_calls.end());
+    ObserveTurn(prepared, core::Status::Ok());
+    response.llm_calls = std::move(prepared.llm_calls);
+    for (const auto& tool : prepared.tools) response.tools_declared.push_back(tool.name);
     response.latency.callback_to_response = Since(prepared.started_at) - response.latency.total;
     CompletedChat completed;
     completed.response = std::move(response);

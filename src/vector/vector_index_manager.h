@@ -78,7 +78,7 @@ private:
         std::list<std::int64_t>::iterator lru_iter;
     };
 
-    core::Result<ResidentIndex*> EnsureResidentLocked(std::int64_t partition_id);
+    core::Result<std::shared_ptr<ResidentIndex>> EnsureResidentLocked(std::int64_t partition_id);
     void TouchLruLocked(ResidentIndex& entry);
     void EvictLruLocked();
 
@@ -89,7 +89,8 @@ private:
 
     mutable std::mutex lock_;
     std::list<std::int64_t> lru_;  // MRU at front, LRU at back
-    std::unordered_map<std::int64_t, ResidentIndex> resident_;
+    // 查询持有共享租约；LRU 淘汰只移除缓存所有权，不销毁正在检索的索引。
+    std::unordered_map<std::int64_t, std::shared_ptr<ResidentIndex>> resident_;
 };
 
 }  // namespace agent::vector

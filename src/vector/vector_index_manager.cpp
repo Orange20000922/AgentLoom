@@ -49,7 +49,11 @@ core::Result<std::vector<vector_storage::EntryRecord>> VectorIndexManager::Searc
         return core::Status(core::ErrorCode::InvalidArgument, "Query dimension mismatch");
     }
 
-    ResidentIndex* resident = nullptr;
+    if (options.top_k == 0 || options_.max_resident_partitions == 0) {
+        return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                   "top_k and resident partition capacity must be positive");
+    }
+    std::shared_ptr<ResidentIndex> resident;
     {
         std::lock_guard lock(lock_);
         auto r = EnsureResidentLocked(partition_id);
@@ -112,7 +116,7 @@ core::Status VectorIndexManager::NotifyInserted(std::int64_t partition_id,
     if (it == resident_.end()) {
         return core::Status::Ok();  // not resident, next Search will hydrate
     }
-    return it->second.index->Add(vector, std::span<const std::int64_t>{&entry_id, 1});
+    return it->second->index->Add(vector, std::span<const std::int64_t>{&entry_id, 1});
 }
 
 core::Status VectorIndexManager::NotifyDeleted(std::int64_t partition_id, std::int64_t entry_id) {
@@ -121,7 +125,7 @@ core::Status VectorIndexManager::NotifyDeleted(std::int64_t partition_id, std::i
     if (it == resident_.end()) {
         return core::Status::Ok();
     }
-    return it->second.index->Remove(std::span<const std::int64_t>{&entry_id, 1});
+    return it->second->index->Remove(std::span<const std::int64_t>{&entry_id, 1});
 }
 
 bool VectorIndexManager::IsResident(std::int64_t partition_id) const {
@@ -133,7 +137,7 @@ void VectorIndexManager::Evict(std::int64_t partition_id) {
     std::lock_guard lock(lock_);
     auto it = resident_.find(partition_id);
     if (it == resident_.end()) return;
-    lru_.erase(it->second.lru_iter);
+    lru_.erase(it->second->lru_iter);
     resident_.erase(it);
 }
 
@@ -142,7 +146,7 @@ std::size_t VectorIndexManager::ResidentCount() const {
     return resident_.size();
 }
 
-core::Result<VectorIndexManager::ResidentIndex*> VectorIndexManager::EnsureResidentLocked(
+core::Result<std::shared_ptr<VectorIndexManager::ResidentIndex>> VectorIndexManager::EnsureResidentLocked(
     std::int64_t partition_id) {
 
     auto it = resident_.find(partition_id);
@@ -152,11 +156,11 @@ core::Result<VectorIndexManager::ResidentIndex*> VectorIndexManager::EnsureResid
         if (!snapshot_r) return snapshot_r.status();
         auto snapshot = std::move(snapshot_r).value();
 
-        if (it->second.source_modified_at_ms >= snapshot.last_modified_at_ms) {
-            return &it->second;  // still fresh
+        if (it->second->source_modified_at_ms >= snapshot.last_modified_at_ms) {
+            return it->second;  // still fresh
         }
         // Stale — evict and rebuild
-        lru_.erase(it->second.lru_iter);
+        lru_.erase(it->second->lru_iter);
         resident_.erase(it);
     }
 
@@ -203,8 +207,9 @@ core::Result<VectorIndexManager::ResidentIndex*> VectorIndexManager::EnsureResid
     // Insert into LRU (front = MRU)
     lru_.push_front(partition_id);
     resident.lru_iter = lru_.begin();
-    auto [inserted_it, _] = resident_.emplace(partition_id, std::move(resident));
-    return &inserted_it->second;
+    auto [inserted_it, _] = resident_.emplace(
+        partition_id, std::make_shared<ResidentIndex>(std::move(resident)));
+    return inserted_it->second;
 }
 
 void VectorIndexManager::TouchLruLocked(ResidentIndex& entry) {

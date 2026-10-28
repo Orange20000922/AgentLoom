@@ -927,6 +927,7 @@ core::Result<std::shared_ptr<agent::service::persona::IToolMemoryProvider>> Crea
         entry.payload = payload;
         nlohmann::json meta{
             {"skill_id", manifest.skill_id},
+            {"version", manifest.version},
             {"tool_id", manifest.skill_id},
             {"priority", 100},
             {"instruction", manifest.prompt_instruction},
