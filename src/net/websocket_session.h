@@ -79,15 +79,15 @@ private:
     ConnectionLease lease_;
     WebSocketSessionOptions options_;
     WebSocketSessionCallbacks callbacks_;
-    WebSocketOutboundQueue outbound_queue_;
-    WebSocketMessageAssembler inbound_message_assembler_;
     core::BucketMemoryPool memory_pool_;
     SharedBuffer read_buffer_;
+    WebSocketMessageAssembler inbound_message_assembler_;
+    WebSocketOutboundQueue outbound_queue_;
+    WebSocketFrame current_write_;
     std::size_t read_capacity_ = 0;
     std::size_t full_read_streak_ = 0;
     std::size_t current_message_bytes_ = 0;
     WebSocketMessageKind current_message_kind_ = WebSocketMessageKind::Binary;
-    WebSocketFrame current_write_;
     bool writing_ = false;
     bool closing_ = false;
     bool discarding_oversized_message_ = false;

@@ -85,8 +85,8 @@ WebSocketSession::WebSocketSession(tcp::socket socket,
       lease_(std::move(lease)),
       options_(std::move(options)),
       callbacks_(std::move(callbacks)),
-      outbound_queue_(MakeWebSocketOutboundQueue(options_.websocket)),
-      inbound_message_assembler_(options_.websocket) {}
+      inbound_message_assembler_(options_.websocket),
+      outbound_queue_(MakeWebSocketOutboundQueue(options_.websocket)) {}
 
 WebSocketSession::~WebSocketSession() {
     // Stop 停止 IO 后再释放 Session；没有读回调时也补齐一次关闭摘要。
@@ -192,6 +192,10 @@ void WebSocketSession::Run() {
 }
 
 core::Status WebSocketSession::Send(WebSocketFrame frame) {
+    // 关闭后的迟到发送直接返回稳定错误，不再分配缓冲；与关闭并发时由队列锁内的 closed 状态兜底。
+    if (close_notified_.load(std::memory_order_acquire)) {
+        return core::Status::Error(core::ErrorCode::Unavailable, "websocket connection is closed");
+    }
     WebSocketFrame owned_frame;
     owned_frame.kind = frame.kind;
     owned_frame.final_fragment = frame.final_fragment;
@@ -206,6 +210,9 @@ core::Status WebSocketSession::Send(WebSocketFrame frame) {
 
     auto status = outbound_queue_.TryPush(std::move(owned_frame));
     if (!status.ok()) {
+        if (status.code() == core::ErrorCode::Cancelled) {
+            return core::Status::Error(core::ErrorCode::Unavailable, "websocket connection is closed");
+        }
         Close(ConnectionCloseInfo::Backpressure(status.message()));
         return status;
     }
@@ -452,6 +459,8 @@ void WebSocketSession::NotifyClose(const ConnectionCloseInfo& close_info) {
     enriched.connection_id = lease_.context().connection_id;
     enriched.target = std::string(request_.target());
     LogClosed(enriched);
+    // 关闭并丢弃未发送帧：连接已不可写，迟到入队由队列返回 Cancelled。
+    outbound_queue_.Close(true);
     lease_.Close(enriched);
     if (callbacks_.close_handler) {
         callbacks_.close_handler(enriched);
