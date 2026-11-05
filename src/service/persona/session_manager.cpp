@@ -36,12 +36,26 @@ public:
                   SessionTurnCompletion completion,
                   SessionClosedCallback closed_callback,
                   std::shared_ptr<ResourceAccounting> resource_accounting,
-                  core::LoggerAdapter logger)
+                  core::LoggerAdapter logger,
+                  std::string trace_id = {})
         : slot_(std::move(slot)),
           completion_(std::move(completion)),
           closed_callback_(std::move(closed_callback)),
           resource_accounting_(std::move(resource_accounting)),
-          logger_(std::move(logger)) {}
+          logger_(std::move(logger)),
+          trace_id_(std::move(trace_id)) {}
+
+    // 排队取消与 worker 启动互斥：同一 CAS 决定 Turn 被丢弃还是进入异步执行流。
+    bool TryStart() noexcept {
+        auto expected = Phase::Queued;
+        return phase_.compare_exchange_strong(expected, Phase::Started, std::memory_order_acq_rel);
+    }
+    bool TryCancelQueued() noexcept {
+        auto expected = Phase::Queued;
+        return phase_.compare_exchange_strong(expected, Phase::Cancelled, std::memory_order_acq_rel);
+    }
+    bool queued() const noexcept { return phase_.load(std::memory_order_acquire) == Phase::Queued; }
+    const std::string& trace_id() const noexcept { return trace_id_; }
 
     ~TurnOperation() {
         if (!finished_.load(std::memory_order_acquire)) {
@@ -89,11 +103,15 @@ public:
     }
 
 private:
+    enum class Phase { Queued, Started, Cancelled };
+
     std::shared_ptr<SessionSlot> slot_;
     SessionTurnCompletion completion_;
     SessionClosedCallback closed_callback_;
     std::shared_ptr<ResourceAccounting> resource_accounting_;
     core::LoggerAdapter logger_;
+    std::string trace_id_;
+    std::atomic<Phase> phase_{Phase::Queued};
     std::atomic<bool> finished_{false};
 };
 
@@ -656,10 +674,24 @@ core::Status SessionManager::SubmitTurnAsync(DispatchOptions options,
         std::move(completion),
         session_closed_callback_,
         resource_accounting_,
-        logger_);
+        logger_,
+        trace_id);
+    {
+        // 仅登记弱引用；已启动或已释放的条目在登记时顺带清理，长度受 outstanding_turns 约束。
+        std::lock_guard lock(slot->mutex);
+        std::erase_if(slot->queued_turns, [](const auto& weak) {
+            auto queued = weak.lock();
+            return !queued || !queued->queued();
+        });
+        slot->queued_turns.push_back(operation_state);
+    }
     auto status = execution_pool.Submit(
         [this, slot, operation_state, session_id, trace_id, user_uuid, module, operation,
          task = std::move(task)](core::ThreadPoolContext& context) mutable -> core::Status {
+            if (!operation_state->TryStart()) {
+                // 排队期间已被取消并完成收尾：直接出队丢弃，不进入异步执行流。
+                return core::Status::Error(core::ErrorCode::Cancelled, "queued async turn was cancelled");
+            }
             core::TraceContext task_trace;
             task_trace.trace_id = trace_id;
             task_trace.user_uuid = user_uuid;
@@ -783,9 +815,40 @@ core::Status SessionManager::SubmitTurnAsync(DispatchOptions options,
         std::move(metadata));
 
     if (!status.ok()) {
+        static_cast<void>(operation_state->TryCancelQueued());
         operation_state->Finish(status, true);
     }
     return status;
+}
+
+core::Status SessionManager::CancelQueuedTurn(std::string_view session_id, std::string_view trace_id) {
+    if (session_id.empty() || trace_id.empty()) {
+        return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                   "session_id and trace_id are required to cancel a queued turn");
+    }
+    auto slot_result = FindSlot(session_id);
+    if (!slot_result.ok()) {
+        return slot_result.status();
+    }
+    auto slot = std::move(slot_result).value();
+    std::shared_ptr<TurnOperation> cancelled;
+    {
+        std::lock_guard lock(slot->mutex);
+        for (auto it = slot->queued_turns.begin(); it != slot->queued_turns.end(); ++it) {
+            auto queued = it->lock();
+            if (queued && queued->trace_id() == trace_id && queued->TryCancelQueued()) {
+                cancelled = std::move(queued);
+                slot->queued_turns.erase(it);
+                break;
+            }
+        }
+    }
+    if (!cancelled) {
+        return core::Status::Error(core::ErrorCode::NotFound, "no queued turn matches trace_id");
+    }
+    // Finish 会重新获取 slot 锁并执行业务 callback，必须在锁外调用。
+    cancelled->Finish(core::Status::Error(core::ErrorCode::Cancelled, "queued async turn was cancelled"), true);
+    return core::Status::Ok();
 }
 
 SessionThreadPoolStats SessionManager::PoolStats() const {
