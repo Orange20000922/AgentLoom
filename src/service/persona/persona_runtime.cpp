@@ -320,6 +320,13 @@ core::Status PersonaRuntime::CancelAsyncTurn(std::string_view session_id,
         return core::Status::Error(core::ErrorCode::InvalidArgument,
                                    "session_id is required");
     }
+    // 先尝试按 trace 出队丢弃排队中的 Turn；Turn 只会 Queued→Started 单向推进，未命中再查在途操作。
+    if (!trace_id.empty()) {
+        auto dequeued = sessions_.CancelQueuedTurn(session_id, trace_id);
+        if (dequeued.ok() || dequeued.code() != core::ErrorCode::NotFound) {
+            return dequeued;
+        }
+    }
     std::shared_ptr<llm::IAsyncLlmOperation> llm_operation;
     std::shared_ptr<AsyncTurnOperation> turn_operation;
     {

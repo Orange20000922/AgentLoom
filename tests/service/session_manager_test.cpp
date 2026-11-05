@@ -692,6 +692,89 @@ TEST(SessionManagerTest, AsyncTurnReleasesWorkerButKeepsSameSessionLaneUntilFini
     compute.Shutdown(true);
 }
 
+// #67：排队中的 Turn 按 trace 出队丢弃，不进入执行流；已启动 Turn 与其他排队 Turn 不受影响。
+TEST(SessionManagerTest, CancelQueuedTurnDiscardsOnlyMatchingTraceBeforeStart) {
+    core::ThreadPool compute({1, 32, "queued-cancel-compute"});
+    core::ThreadPool io({1, 32, "queued-cancel-io"});
+    core::ThreadPool llm({1, 32, "queued-cancel-llm",
+                          std::make_shared<GatewaySessionAffinityScheduler>(
+                              GatewaySessionAffinitySchedulerOptions{
+                                  .max_active_keys = 8,
+                                  .max_outstanding_per_key = 4,
+                                  .max_outstanding_per_fairness_key = 8,
+                                  .max_outstanding_per_tenant = 16})});
+    ASSERT_TRUE(compute.Start().ok());
+    ASSERT_TRUE(io.Start().ok());
+    ASSERT_TRUE(llm.Start().ok());
+    SessionManager manager(compute, io, {}, core::LoggerAdapter::ForModule("service"), &llm);
+    ASSERT_TRUE(manager.CreateSession(MakeCreateRequest("session-queued")).ok());
+
+    std::promise<SessionManager::SessionTurnAsyncFinish> active_ready;
+    auto active_future = active_ready.get_future();
+    ASSERT_TRUE(manager.SubmitTurnAsync(
+        DispatchOptions{.session_id = "session-queued", .trace_id = "trace-active"},
+        [&active_ready](const auto&, auto&, auto finish) {
+            active_ready.set_value(std::move(finish));
+            return core::Status::Ok();
+        },
+        [](auto) {}).ok());
+    ASSERT_EQ(active_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto finish_active = active_future.get();
+
+    std::atomic<int> cancelled_started{0};
+    std::atomic<int> cancelled_completions{0};
+    core::ErrorCode cancelled_code = core::ErrorCode::Ok;
+    ASSERT_TRUE(manager.SubmitTurnAsync(
+        DispatchOptions{.session_id = "session-queued", .trace_id = "trace-cancelled"},
+        [&cancelled_started](const auto&, auto&, auto finish) {
+            ++cancelled_started;
+            finish(core::Status::Error(core::ErrorCode::InternalError, "must not start"));
+            return core::Status::Ok();
+        },
+        [&](auto result) {
+            ++cancelled_completions;
+            cancelled_code = result.ok() ? core::ErrorCode::Ok : result.status().code();
+        }).ok());
+    std::promise<core::Result<SessionTurnReceipt>> kept_done;
+    auto kept_future = kept_done.get_future();
+    ASSERT_TRUE(manager.SubmitTurnAsync(
+        DispatchOptions{.session_id = "session-queued", .trace_id = "trace-kept"},
+        [](const auto& snapshot, auto&, auto finish) {
+            SessionTurnCommit commit;
+            commit.trace_id = "trace-kept";
+            commit.turn.user_input = "kept";
+            commit.turn.response = "kept-response";
+            commit.emotion_state = snapshot.state.emotion_state;
+            finish(std::move(commit));
+            return core::Status::Ok();
+        },
+        [&kept_done](auto result) { kept_done.set_value(std::move(result)); }).ok());
+
+    EXPECT_EQ(manager.CancelQueuedTurn("session-queued", "trace-active").code(), core::ErrorCode::NotFound);
+    ASSERT_TRUE(manager.CancelQueuedTurn("session-queued", "trace-cancelled").ok());
+    EXPECT_EQ(manager.CancelQueuedTurn("session-queued", "trace-cancelled").code(), core::ErrorCode::NotFound);
+    EXPECT_EQ(cancelled_completions, 1);
+    EXPECT_EQ(cancelled_code, core::ErrorCode::Cancelled);
+
+    SessionTurnCommit active_commit;
+    active_commit.trace_id = "trace-active";
+    active_commit.turn.user_input = "active";
+    active_commit.turn.response = "active-response";
+    finish_active(std::move(active_commit));
+    ASSERT_EQ(kept_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(kept_future.get().ok());
+    EXPECT_EQ(cancelled_started, 0);
+    EXPECT_EQ(cancelled_completions, 1);
+
+    auto snapshot = manager.GetSessionSnapshot("session-queued");
+    ASSERT_TRUE(snapshot.ok());
+    EXPECT_EQ(snapshot.value().metrics.turn_count, 2u);
+    manager.CloseSession("session-queued");
+    llm.Shutdown(true);
+    io.Shutdown(true);
+    compute.Shutdown(true);
+}
+
 TEST(GatewaySessionAffinitySchedulerTest, SerializesSessionKeyAndRejectsExcessOutstandingWork) {
     auto scheduler = std::make_shared<GatewaySessionAffinityScheduler>(
         GatewaySessionAffinitySchedulerOptions{

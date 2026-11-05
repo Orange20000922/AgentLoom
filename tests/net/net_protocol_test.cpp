@@ -152,6 +152,28 @@ TEST(ConnectionPoolTest, AllowsHttpLeaseToUpgradeWhenPoolIsAtTotalLimit) {
     EXPECT_EQ(stats.active_websocket_connections, 1u);
 }
 
+TEST(ConnectionPoolTest, ClosedLeaseKeepsImmutableResourcesForLateAccess) {
+    net::ConnectionPool pool({.max_connections = 1});
+    auto acquired = pool.Acquire(net::ProtocolConnectionKind::WebSocket, net::ConnectionContext{7, "127.0.0.1"});
+    ASSERT_TRUE(acquired.ok()) << acquired.status().message();
+    auto lease = std::move(acquired).value();
+    auto before = net::SharedBuffer::Copy(lease.memory_pool(), "before close");
+    ASSERT_TRUE(before.ok());
+
+    lease.Close(net::ConnectionCloseInfo::Remote());
+    lease.Close(net::ConnectionCloseInfo::Remote());
+    EXPECT_FALSE(lease.valid());
+    EXPECT_EQ(pool.Stats().active_connections, 0u);
+    EXPECT_EQ(pool.Stats().closed_connections, 1u);
+    // 关闭只归还配额：上下文、内存池仍可被迟到回调访问，且配额可立即复用。
+    EXPECT_EQ(lease.connection_id(), 7u);
+    EXPECT_EQ(lease.context().remote_address, "127.0.0.1");
+    auto after = net::SharedBuffer::Copy(lease.memory_pool(), "after close");
+    ASSERT_TRUE(after.ok()) << after.status().message();
+    EXPECT_EQ(after.value().view(), "after close");
+    EXPECT_TRUE(pool.Acquire(net::ProtocolConnectionKind::Http, net::ConnectionContext{8, "127.0.0.1"}).ok());
+}
+
 TEST(SharedBufferTest, RejectsWritesBeyondCapacity) {
     core::BucketMemoryPool pool;
     auto buffer_result = net::SharedBuffer::AllocateCapacity(pool, 8);
@@ -890,6 +912,97 @@ TEST(HttpServerRuntimeTest, ReleasesWebSocketSessionAfterPeerClose) {
     }
     EXPECT_TRUE(session.expired());
 
+    server.Stop();
+}
+
+// #67：连接关闭后，业务仍持有的 request 可安全读取上下文、分配缓冲并得到稳定的发送错误。
+TEST(HttpServerRuntimeTest, LateWebSocketRequestAccessAfterCloseIsSafe) {
+    net::HttpServer server({.address = "127.0.0.1", .port = 0, .io_threads = 1});
+    std::shared_ptr<net::IWebSocketStreamRequest> held;
+    std::mutex held_mutex;
+    std::promise<void> message_seen;
+    std::promise<void> close_seen;
+    auto message_future = message_seen.get_future();
+    auto close_future = close_seen.get_future();
+    server.SetWebSocketStreamHandler("/stream", [&](std::shared_ptr<net::IWebSocketStreamRequest> request) {
+        std::lock_guard lock(held_mutex);
+        held = std::move(request);
+        message_seen.set_value();
+    });
+    server.SetWebSocketCloseHandler([&](const net::ConnectionCloseInfo&) { close_seen.set_value(); });
+    ASSERT_TRUE(server.Start().ok());
+
+    asio::io_context io;
+    tcp::resolver resolver(io);
+    beast::websocket::stream<tcp::socket> ws(io);
+    asio::connect(ws.next_layer(), resolver.resolve("127.0.0.1", std::to_string(server.port())));
+    ws.handshake("127.0.0.1", "/stream");
+    ws.write(asio::buffer(std::string("frame")));
+    ASSERT_EQ(message_future.wait_for(2s), std::future_status::ready);
+    beast::error_code ec;
+    ws.close(beast::websocket::close_code::normal, ec);
+    ASSERT_EQ(close_future.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(server.ConnectionStats().active_websocket_connections, 0u);
+
+    std::shared_ptr<net::IWebSocketStreamRequest> request;
+    { std::lock_guard lock(held_mutex); request = std::move(held); }
+    ASSERT_TRUE(request);
+    // 迟到回调路径：与 Application SendWs 相同，先从 request 的池分配再发送。
+    EXPECT_NE(request->connection().connection_id, 0u);
+    auto payload = net::SharedBuffer::Copy(request->memory_pool(), "late reply");
+    ASSERT_TRUE(payload.ok()) << payload.status().message();
+    auto status = request->Send(net::WebSocketFrame{net::WebSocketMessageKind::Text, true, false,
+                                                    std::move(payload).value()});
+    EXPECT_EQ(status.code(), core::ErrorCode::Unavailable);
+    // 释放最后的引用会析构 Session：池必须晚于其分配的缓冲释放。
+    request.reset();
+    server.Stop();
+}
+
+// 关闭与发送并发：所有发送结果均为成功或稳定错误，排队帧随 Session 安全释放。
+TEST(HttpServerRuntimeTest, ConcurrentWebSocketSendAndCloseReleaseQueuedFrames) {
+    net::HttpServer server({.address = "127.0.0.1", .port = 0, .io_threads = 2});
+    std::promise<std::shared_ptr<net::IWebSocketStreamRequest>> accepted;
+    auto accepted_future = accepted.get_future();
+    std::atomic_bool first{true};
+    server.SetWebSocketStreamHandler("/stream", [&](std::shared_ptr<net::IWebSocketStreamRequest> request) {
+        if (first.exchange(false)) accepted.set_value(std::move(request));
+    });
+    ASSERT_TRUE(server.Start().ok());
+
+    asio::io_context io;
+    tcp::resolver resolver(io);
+    beast::websocket::stream<tcp::socket> ws(io);
+    asio::connect(ws.next_layer(), resolver.resolve("127.0.0.1", std::to_string(server.port())));
+    ws.handshake("127.0.0.1", "/stream");
+    ws.write(asio::buffer(std::string("frame")));
+    ASSERT_EQ(accepted_future.wait_for(2s), std::future_status::ready);
+    auto request = accepted_future.get();
+
+    std::atomic_int unexpected{0};
+    std::vector<std::thread> senders;
+    for (int t = 0; t < 4; ++t) {
+        senders.emplace_back([&] {
+            for (int i = 0; i < 200; ++i) {
+                auto payload = net::SharedBuffer::Copy(request->memory_pool(), std::string(512, 'x'));
+                if (!payload.ok()) { ++unexpected; continue; }
+                auto status = request->Send(net::WebSocketFrame{net::WebSocketMessageKind::Text, true, false,
+                                                                std::move(payload).value()});
+                const auto code = status.code();
+                if (!status.ok() && code != core::ErrorCode::Unavailable &&
+                    code != core::ErrorCode::ResourceExhausted) {
+                    ++unexpected;
+                }
+            }
+        });
+    }
+    request->Close(net::ConnectionCloseInfo::Shutdown("test close"));
+    for (auto& sender : senders) sender.join();
+    EXPECT_EQ(unexpected, 0);
+    // 客户端不读取，排队帧仍挂在 Session 上；释放 request 后由 Session 析构安全回收。
+    beast::error_code ec;
+    ws.next_layer().close(ec);
+    request.reset();
     server.Stop();
 }
 

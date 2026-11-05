@@ -14,16 +14,20 @@ struct ConnectionPoolEntry {
     ConnectionPoolEntry(ProtocolConnectionKind connection_kind,
                         ConnectionContext connection_context,
                         std::size_t memory_reserve_bytes,
-                        std::size_t memory_blocks_per_slab)
+                        std::size_t memory_blocks_per_slab,
+                        core::ThreadPool* borrowed_task_pool)
         : context(std::move(connection_context)),
           kind(connection_kind),
           last_activity(std::chrono::steady_clock::now()),
-          memory_pool(memory_reserve_bytes, memory_blocks_per_slab) {}
+          memory_pool(memory_reserve_bytes, memory_blocks_per_slab),
+          task_pool(borrowed_task_pool) {}
 
+    // context/memory_pool/task_pool 创建后不变；lease 关闭后仍由持有者保活，供迟到回调安全读取。
     ConnectionContext context;
     ProtocolConnectionKind kind = ProtocolConnectionKind::Http;
     std::chrono::steady_clock::time_point last_activity;
     core::BucketMemoryPool memory_pool;
+    core::ThreadPool* task_pool = nullptr;
     std::atomic_bool active{true};
     ConnectionCloseInfo close_info;
 };
@@ -59,7 +63,8 @@ struct ConnectionPoolState {
                 kind,
                 std::move(context),
                 options.memory_reserve_bytes,
-                options.memory_blocks_per_slab);
+                options.memory_blocks_per_slab,
+                options.task_pool);
         } catch (const std::bad_alloc&) {
             ++stats.rejected_connections;
             return core::Status::Error(core::ErrorCode::OutOfMemory, "connection allocation failed");
@@ -276,7 +281,8 @@ const core::RawMemoryPool& ConnectionLease::memory_pool() const noexcept {
 }
 
 core::ThreadPool* ConnectionLease::task_pool() const noexcept {
-    return owner_ ? owner_->options.task_pool : nullptr;
+    // 读取 entry 上的不可变快照，避免与 Close() 重置 owner_ 产生跨线程竞争。
+    return entry_ ? entry_->task_pool : nullptr;
 }
 
 core::Status ConnectionLease::SetKind(ProtocolConnectionKind kind) {
@@ -297,16 +303,15 @@ void ConnectionLease::Touch() {
 }
 
 void ConnectionLease::Close(ConnectionCloseInfo close_info) {
-    if (!owner_ || !entry_) {
-        owner_.reset();
-        entry_.reset();
+    // 关闭只归还连接配额并从池中摘除；entry 随 lease 析构释放，
+    // 关闭后的 context()/memory_pool()/task_pool() 仍指向有效对象（#67）。
+    if (!owner_) {
         return;
     }
-
-    const auto connection_id = entry_->context.connection_id;
-    owner_->Release(connection_id, std::move(close_info));
+    if (entry_) {
+        owner_->Release(entry_->context.connection_id, std::move(close_info));
+    }
     owner_.reset();
-    entry_.reset();
 }
 
 ConnectionPool::ConnectionPool(ConnectionPoolOptions options)

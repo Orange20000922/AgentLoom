@@ -246,6 +246,9 @@ public:
     core::Status SubmitTurnAsync(DispatchOptions options,
                                  SessionTurnAsyncTask task,
                                  SessionTurnCompletion completion);
+    /// 取消仍在 Session FIFO 中排队、尚未启动的异步 Turn：直接出队丢弃并以 Cancelled 完成一次。
+    /// 已启动的 Turn 返回 NotFound，由调用方走在途取消。
+    core::Status CancelQueuedTurn(std::string_view session_id, std::string_view trace_id);
     SessionThreadPoolStats PoolStats() const;
     /// 设置 session 关闭通知；callback 在内部资源移除后调用，不应执行长时间阻塞操作。
     void SetSessionClosedCallback(SessionClosedCallback callback);
@@ -256,6 +259,8 @@ private:
         std::string user_uuid;
     };
 
+    class TurnOperation;
+
     struct SessionSlot {
         mutable std::mutex mutex;
         // 仅用于同一 Session 的 Turn 顺序，不保护 SessionState；慢 IO 不会阻塞 Snapshot/Close。
@@ -263,9 +268,10 @@ private:
         SessionState state;
         std::uint64_t next_turn_sequence = 1;
         std::size_t outstanding_turns = 0;
+        // 排队中异步 Turn 的弱引用，受 mutex 保护；仅用于按 trace 出队取消。
+        std::vector<std::weak_ptr<TurnOperation>> queued_turns;
     };
 
-    class TurnOperation;
     struct ResourceAccounting {
         std::atomic<std::size_t> resident_sessions{0};
     };

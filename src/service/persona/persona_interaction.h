@@ -15,6 +15,9 @@ struct PersonaSessionQuery {
     std::string session_id;
     std::string trace_id;
     std::string trusted_user_uuid;
+    // 仅 CancelTurn 使用：非空时只取消 trace 匹配的在途 Turn，避免误取消同 Session 的其他 Turn；
+    // 为空时保持按 Session 取消的既有语义。trace_id 仍只表示本次请求的日志链路。
+    std::string turn_trace_id;
 };
 
 struct ClosePersonaSessionRequest {
