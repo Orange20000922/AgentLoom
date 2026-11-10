@@ -10,14 +10,90 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <nlohmann/json.hpp>
 
 namespace agent::llm {
 
 namespace {
 
+// 诊断只观察线协议，不推断或补造工具调用。单次请求 ID 串联重试及解码前后记录。
+class PayloadTrace {
+public:
+    explicit PayloadTrace(const OpenAiLlmClientOptions& options)
+        : logger_(core::LoggerAdapter::ForModule("llm-payload")),
+          enabled_(options.debug_payloads && logger_.valid() &&
+                   logger_.get()->should_log(spdlog::level::debug)),
+          limit_(std::max<std::size_t>(16, options.debug_payload_max_bytes)), id_(next_id_.fetch_add(1)) {}
+
+    void Body(std::string_view stage, std::string_view body, int status = 0,
+              std::size_t original_bytes = 0) const noexcept {
+        if (!enabled_) return;
+        try {
+            const auto total = original_bytes ? original_bytes : body.size();
+            nlohmann::json item{{"request_id", id_}, {"stage", stage}, {"http_status", status},
+                                {"bytes", total}, {"truncated", total > limit_}};
+            if (body.size() <= limit_) item["body"] = body;
+            else {
+                // 按 UTF-8 字符边界保留首尾；尾部通常包含 DSML 和 finish_reason。
+                auto head = limit_ / 2;
+                auto tail = body.size() - limit_ / 2;
+                while (head && (static_cast<unsigned char>(body[head]) & 0xc0) == 0x80) --head;
+                while (tail < body.size() && (static_cast<unsigned char>(body[tail]) & 0xc0) == 0x80) ++tail;
+                item["head"] = body.substr(0, head);
+                item["tail"] = body.substr(tail);
+                item["omitted_bytes"] = total - head - (body.size() - tail);
+            }
+            logger_.debug("llm_payload {}", item.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+        } catch (...) { /* 诊断失败不改变业务返回值。 */ }
+    }
+
+    void Result(const core::Result<ChatCompletionResponse>& result) const noexcept {
+        if (!enabled_) return;
+        try {
+            if (!result.ok()) {
+                Body("decode_error", result.status().message());
+                return;
+            }
+            const auto& value = result.value();
+            nlohmann::json calls = nlohmann::json::array();
+            for (const auto& call : value.tool_calls)
+                calls.push_back({{"id", call.id}, {"name", call.name}, {"arguments", call.arguments_json}});
+            nlohmann::json decoded{{"id", value.id}, {"model", value.model}, {"content", value.content},
+                {"finish_reason", value.finish_reason}, {"tool_calls", std::move(calls)}};
+            decoded["reasoning_content"] = value.reasoning_content
+                ? nlohmann::json(*value.reasoning_content) : nlohmann::json(nullptr);
+            Body("decoded_response", decoded.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+        } catch (...) { /* 诊断失败不改变业务返回值。 */ }
+    }
+
+    void Append(std::string_view bytes) noexcept {
+        if (!enabled_) return;
+        try {
+        total_ += bytes.size();
+        if (head_.size() < limit_) head_.append(bytes.substr(0, limit_ - head_.size()));
+        if (bytes.size() >= limit_) tail_.assign(bytes.substr(bytes.size() - limit_));
+        else { tail_.append(bytes); if (tail_.size() > limit_) tail_.erase(0, tail_.size() - limit_); }
+        } catch (...) { enabled_ = false; /* 诊断内存不足不能中断业务 SSE。 */ }
+    }
+    void EndStream() const noexcept {
+        if (!enabled_) return;
+        // 收齐 UTF-8 后再输出，避免 SSE 在多字节字符中间分块造成伪泄漏。
+        if (total_ <= limit_) Body("raw_sse", head_);
+        else try { Body("raw_sse", head_ + tail_, 200, total_); }
+        catch (...) { /* 有界拼接失败不改变业务返回值。 */ }
+    }
+private:
+    core::LoggerAdapter logger_;
+    bool enabled_;
+    std::size_t limit_, total_ = 0;
+    std::uint64_t id_;
+    std::string head_, tail_;
+    inline static std::atomic<std::uint64_t> next_id_{1};
+};
+
 // 同步/异步共享 HTTP envelope；线协议仅提供 endpoint 和自有编码结果。
 core::Result<net::HttpClientRequest> BuildHttpRequest(
-    const OpenAiLlmClientOptions& options, const ChatCompletionRequest& request) {
+    const OpenAiLlmClientOptions& options, const ChatCompletionRequest& request, const PayloadTrace& trace) {
     const LlmProtocolContext context{options.default_model, options.response_validation};
     auto encoded = options.protocol->EncodeRequest(request, context);
     if (!encoded.ok()) return encoded.status();
@@ -33,15 +109,17 @@ core::Result<net::HttpClientRequest> BuildHttpRequest(
         http_request.headers.push_back({"Authorization", "Bearer " + options.api_key});
     }
     http_request.body = std::move(encoded).value();
+    trace.Body("encoded_request", http_request.body);
     http_request.timeout_ms = options.timeout_ms;
     return http_request;
 }
 
 core::Result<ChatCompletionResponse> DecodeHttpResponse(
     const net::HttpClientResponse& response, const ChatCompletionRequest& request,
-    const OpenAiLlmClientOptions& options, core::LoggerAdapter& logger) {
+    const OpenAiLlmClientOptions& options, core::LoggerAdapter& logger, const PayloadTrace& trace) {
     const auto status_code = response.status;
     const auto& body = response.body;
+    trace.Body("raw_response", body, status_code);
     if (status_code != 200) {
         core::ErrorCode code = core::ErrorCode::InternalError;
         if (status_code == 401 || status_code == 403) {
@@ -57,7 +135,9 @@ core::Result<ChatCompletionResponse> DecodeHttpResponse(
 
     const LlmProtocolContext context{options.default_model, options.response_validation};
     try {
-        return options.protocol->DecodeResponse(body, request, context, logger);
+        auto result = options.protocol->DecodeResponse(body, request, context, logger);
+        trace.Result(result);
+        return result;
     } catch (const std::exception& error) {
         // 第三方协议异常必须在异步 noexcept 回调边界前转为统一 Status。
         logger.error("LLM protocol response exception: {}", error.what());
@@ -118,7 +198,8 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::Complete(
 core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
     const ChatCompletionRequest& req) {
 
-    auto built = BuildHttpRequest(options_, req);
+    PayloadTrace trace(options_);
+    auto built = BuildHttpRequest(options_, req, trace);
     if (!built.ok()) return built.status();
     auto http_req = std::move(built).value();
 
@@ -140,6 +221,8 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
         }
 
         auto& http_resp = last_result.value();
+        if (http_resp.status >= 500 && attempt < options_.retry_policy.max_retries)
+            trace.Body("retry_response", http_resp.body, http_resp.status);
         // 5xx = server error, retry.  4xx = client error, don't retry.
         if (http_resp.status >= 500 && http_resp.status < 600) {
             if (attempt < options_.retry_policy.max_retries) {
@@ -148,7 +231,7 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
         }
 
         auto logger = core::LoggerAdapter::ForModule("llm-client");
-        return DecodeHttpResponse(http_resp, req, options_, logger);
+        return DecodeHttpResponse(http_resp, req, options_, logger, trace);
     }
 
     return last_result_status;
@@ -231,12 +314,13 @@ public:
                          ChatCompletionRequest request,
                          net::HttpClientRequest http_request,
                          IAsyncLlmClient::Callback callback,
+                         PayloadTrace trace,
                          std::unique_ptr<ILlmStreamDecoder> decoder = {})
         : owner_(std::move(owner)),
           request_(std::move(request)),
           http_request_(std::move(http_request)),
           retry_timer_(owner_->retry_context),
-          callback_(std::move(callback)), decoder_(std::move(decoder)) {}
+          callback_(std::move(callback)), decoder_(std::move(decoder)), trace_(std::move(trace)) {}
 
     void Start() noexcept {
         BeginAttempt();
@@ -305,7 +389,7 @@ private:
                 .on_headers = [self](const net::HttpClientResponse& headers) {
                     if (headers.status != 200)
                         return DecodeHttpResponse(headers, self->request_, self->owner_->options,
-                                                  self->owner_->logger).status();
+                                                  self->owner_->logger, self->trace_).status();
                     for (const auto& header : headers.headers) {
                         auto name = header.name;
                         auto value = header.value;
@@ -325,6 +409,7 @@ private:
                     std::lock_guard lock(self->stream_mutex_);
                     if (self->completed_.load() || self->cancel_requested_.load())
                         return core::Status::Error(core::ErrorCode::Cancelled, "LLM stream cancelled");
+                    self->trace_.Append(bytes);
                     return self->decoder_->Feed(bytes);
                 },
                 .on_complete = [self](core::Status status) {
@@ -369,10 +454,11 @@ private:
         }
         auto response = std::move(result).value();
         if (response.status >= 500 && response.status < 600 && CanRetry()) {
+            trace_.Body("retry_response", response.body, response.status);
             ScheduleRetry();
             return;
         }
-        Finish(DecodeHttpResponse(response, request_, owner_->options, owner_->logger));
+        Finish(DecodeHttpResponse(response, request_, owner_->options, owner_->logger, trace_));
     }
 
     void OnAttemptFailure(const core::Status& status) noexcept {
@@ -427,6 +513,10 @@ private:
             self->retry_timer_.cancel(ignored);
         });
         owner_->Unregister(this);
+        if (request_.stream) {
+            trace_.EndStream();
+            trace_.Result(result);
+        }
         if (!result.ok()) owner_->logger.warn("LLM operation failed code={}", static_cast<int>(result.status().code()));
         auto callback = std::move(callback_);
         try {
@@ -444,6 +534,7 @@ private:
     boost::asio::steady_timer retry_timer_;
     IAsyncLlmClient::Callback callback_;
     std::unique_ptr<ILlmStreamDecoder> decoder_;
+    PayloadTrace trace_;
     std::recursive_mutex stream_mutex_;
     std::mutex mutex_;
     std::shared_ptr<net::IAsyncHttpOperation> http_operation_;
@@ -549,7 +640,8 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::SubmitCo
             impl_->logger.warn("LLM request rejected: {}", status.message());
             return status;
         }
-        auto built = BuildHttpRequest(impl_->options, request);
+        PayloadTrace trace(impl_->options);
+        auto built = BuildHttpRequest(impl_->options, request, trace);
         if (!built.ok()) return built.status();
         std::unique_ptr<ILlmStreamDecoder> decoder;
         if (request.stream) {
@@ -562,7 +654,7 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::SubmitCo
             decoder = std::move(created).value();
         }
         auto operation = std::make_shared<AsyncOpenAiOperation>(
-            impl_, std::move(request), std::move(built).value(), std::move(callback), std::move(decoder));
+            impl_, std::move(request), std::move(built).value(), std::move(callback), std::move(trace), std::move(decoder));
         if (auto status = impl_->Register(operation); !status.ok()) {
             return status;
         }

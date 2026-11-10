@@ -13,7 +13,7 @@
 param(
     [string]$BuildDir = "build\x64-Release-Cold",
     [string]$Config = "Release",
-    [string]$Target,
+    [string[]]$Target,
     [int]$Jobs = 0
 )
 
@@ -76,7 +76,8 @@ try {
     )
 
     if ($Target) {
-        $buildArgs += "--target", $Target
+        $buildArgs += "--target"
+        $buildArgs += $Target
     }
 
     if ($Jobs -gt 0) {

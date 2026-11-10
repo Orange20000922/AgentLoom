@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "extra_cases": [
+    {"id":"hold_vision_en","prompt":"Read the error message on my desktop display.","expect_tool_id":"vision.observe"},
+    {"id":"hold_vision_cn","prompt":"帮我辨认显示器里那个红色提示写了什么。","expect_tool_id":"vision.observe"},
+    {"id":"hold_vision_camera","prompt":"Tell me what the camera is showing right now.","expect_tool_id":"vision.observe"},
+    {"id":"hold_doc_en","prompt":"Summarize the termination obligations in agreement contract-001.","expect_tool_id":"document.analyze"},
+    {"id":"hold_doc_cn","prompt":"阅读 contract-001，找出提前解约需要承担哪些责任。","expect_tool_id":"document.analyze"},
+    {"id":"hold_doc_negated","prompt":"不要查看屏幕，只读取合同 contract-001 的付款条款。","expect_tool_id":"document.analyze"},
+    {"id":"hold_price_en","prompt":"The buyer insists our offer costs too much. Find a sales playbook response.","expect_tool_id":"kb.query"},
+    {"id":"hold_price_cn","prompt":"对方认为报价不划算，帮我从知识库找一些回应策略。","expect_tool_id":"kb.query"},
+    {"id":"hold_kb_synonym","prompt":"Find guidance for negotiating with a buyer who demands a concession.","expect_tool_id":"kb.query"},
+    {"id":"hold_profile_en","prompt":"Look up customer-001's previous orders and buying habits.","expect_tool_id":"profile.read"},
+    {"id":"hold_profile_cn","prompt":"查一下 customer-001 以前买过什么，平时更喜欢哪类产品。","expect_tool_id":"profile.read"},
+    {"id":"hold_profile_negated","prompt":"不用看屏幕，读取 customer-001 的偏好和购买历史。","expect_tool_id":"profile.read"},
+    {"id":"hold_general","prompt":"Explain what a customer profile means, without accessing any customer's data.","expect_tool_id":""},
+    {"id":"hold_price_negative","prompt":"Translate the phrase 'lower price' into Chinese. Do not look anything up.","expect_tool_id":""},
+    {"id":"hold_screen_negative","prompt":"Explain what screen resolution means. Do not inspect my screen.","expect_tool_id":""},
+    {"id":"hold_quote_negative","prompt":"只翻译这句话：客户要求折扣。不要调用任何工具。","expect_tool_id":""},
+    {"id":"hold_joke","prompt":"讲一个关于程序员的小笑话，不需要工具。","expect_tool_id":""},
+    {"id":"hold_weather","prompt":"Will it rain tomorrow?","expect_tool_id":""},
+    {"id":"hold_refusal","prompt":"现在不要使用任何外部能力，屏幕的内容也不要读取，只回应好的。","expect_tool_id":""},
+    {"id":"hold_doc_definition","prompt":"What is a liability clause? Explain the concept without reading a document.","expect_tool_id":""}
+  ],
+  "english_seeds": {
+    "vision.observe":"Observe live screen or camera content. Read text on a display, inspect a visible table, or identify an object in the current picture.",
+    "document.analyze":"Read a document or contract by its document ID. Analyze liability, termination and payment clauses and summarize the actual document text.",
+    "kb.query":"Retrieve sales knowledge and objection-handling advice. Find negotiation talk tracks for a customer pushing for a lower price or requesting a discount.",
+    "profile.read":"Retrieve a customer's actual preferences, previous purchases and interaction history by customer ID. Look up their profile and past orders."
+  },
+  "bilingual_seeds": {
+    "vision.observe":"观察当前屏幕、摄像头、画面，读取可见内容。Observe live screen or camera content. Read text on a display or inspect the visible picture.",
+    "document.analyze":"读取指定文档，分析合同中的违约、付款、解约条款。Read a document or contract by ID and analyze liability, payment and termination clauses.",
+    "kb.query":"检索销售知识、异议处理和谈判话术，处理客户压价、要求优惠。Retrieve sales knowledge, objection-handling and negotiation advice for customers pushing for a lower price or a discount.",
+    "profile.read":"按客户标识查询画像、偏好、购买记录与历史订单。Retrieve a customer's preferences, previous purchases, profile and interaction history by customer ID."
+  },
+  "expanded_keywords": {
+    "vision.observe":{"keywords":["屏幕","画面","摄像头","screen","camera","visible","display","desktop","显示器"],"negative_keywords":["不用看","别看","不要看","无需看","不要查看","不用查看","不要调用任何工具","不需要工具","Do not inspect","Do not look"]},
+    "document.analyze":{"keywords":["文档","合同","条款","文件","document","contract","clause","agreement","liability","解约"],"negative_keywords":["不要调用任何工具","不需要工具","without reading a document"]},
+    "kb.query":{"keywords":["话术","异议","压价","谈判","产品知识","objection","price","discount","negotiat","playbook","知识库"],"negative_keywords":["不要调用任何工具","不需要工具","Do not look anything up"]},
+    "profile.read":{"keywords":["画像","偏好","购买记录","历史订单","客户资料","preference","previous orders","buying habits","以前买过","购买历史"],"negative_keywords":["不要调用任何工具","不需要工具","without accessing any customer's data"]}
+  },
+  "scoped_prompt": "\nTool selection policy: Invoke only tools directly needed for the user's current request. Available document/customer IDs are argument values, not requests to access those resources. Sales guidance uses kb_query; do not fetch a customer profile or document unless the user requests that specific data. Use document_analyze for an identified document and profile_read for actual customer records. Definitions, translations, jokes, quoted tool names and explicit refusal do not require external access. When retrieval is explicitly requested, search with the information available instead of asking for optional detail. After a tool supplies sufficient evidence, answer from that evidence without auxiliary lookups. Never invent required identifiers; ask for them if no trusted value is available.",
+  "focus_cases": ["kb_en","kb_cn","nearmiss_kb","doc_cn","profile_cn","hold_price_en","hold_general","hold_refusal"]
+}

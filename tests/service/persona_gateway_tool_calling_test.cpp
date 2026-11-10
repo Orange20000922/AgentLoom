@@ -522,6 +522,7 @@ TEST_P(RequiredToolRuntimeTest, PrefetchRunsBeforeFirstGenerationWithoutModelToo
     ASSERT_EQ(requests.size(), 1u);
     ASSERT_EQ(requests[0].tools.size(), 1u);
     EXPECT_EQ(requests[0].tools[0].name, "test_lookup");
+    EXPECT_EQ(requests[0].tool_choice, "auto");
     ASSERT_EQ(requests[0].messages.back().role, llm::ChatRole::Tool);
     EXPECT_NE(requests[0].messages.back().content.find("verified"), std::string::npos);
     EXPECT_EQ(harness.memory->admissions, 1);
@@ -561,6 +562,36 @@ TEST_P(RequiredToolRuntimeTest, MissingRequiredCallFailsWithoutCommitOrLeakingSt
     EXPECT_EQ(observer->turns.back().status.code(), core::ErrorCode::FailedPrecondition);
     EXPECT_TRUE(observer->turns.back().satisfied_tools.empty());
     EXPECT_EQ(observer->turns.back().required_tools, std::vector<std::string>{"test_lookup"});
+    ASSERT_EQ(harness.llm_client->Requests().size(), 1u);
+    EXPECT_EQ(harness.llm_client->Requests()[0].tool_choice, "required");
+}
+
+TEST_P(RequiredToolRuntimeTest, RequiredUsesProtocolConstraintThenReleasesFollowUp) {
+    Harness harness;
+    auto options = harness.Options();
+    options.runtime.skill_tool_policy = std::make_shared<RequiredLookupPolicy>();
+    gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam() != 0));
+    ASSERT_TRUE(server.Start().ok());
+    CreateSession(server);
+    gateway::ChatGatewayRequest request;
+    request.session_id = kSession;
+    request.authenticated_user_uuid = kUser;
+    request.trace_id = "required-protocol";
+    request.message = "lookup";
+    request.stream = GetParam() == 2;
+    request.event_sink = [](const auto&) { return core::Status::Ok(); };
+    std::promise<core::Result<gateway::ChatGatewayResponse>> promise;
+    auto future = promise.get_future();
+    ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { promise.set_value(std::move(result)); }).ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    const auto requests = harness.llm_client->Requests();
+    ASSERT_EQ(requests.size(), 2u);
+    EXPECT_EQ(requests[0].tool_choice, "required");
+    EXPECT_EQ(requests[1].tool_choice, "auto");
+    EXPECT_EQ(harness.executor->starts, 1);
+    EXPECT_EQ(harness.memory->admissions, 1);
 }
 
 TEST_P(RequiredToolRuntimeTest, DeniedPrefetchNeverExecutesOrGenerates) {

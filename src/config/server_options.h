@@ -101,6 +101,9 @@ struct VlmPromptKvCacheOptions {
 };
 
 struct LlmOptions {
+    // 对话与 reasoning 原文诊断默认关闭，开启后仍受 Debug 日志级别控制。
+    bool debug_payloads = false;
+    std::size_t debug_payload_max_bytes = 65536;
     bool enabled = true;
     std::string base_url;
     std::string api_key_env = "AGENT_LLM_API_KEY";

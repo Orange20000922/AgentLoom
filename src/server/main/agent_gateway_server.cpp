@@ -345,6 +345,8 @@ core::Result<LlmClientBundle> CreateLlmClient(const ToolConfig& config,
         auto http_client = std::shared_ptr<agent::net::IHttpClient>(std::move(http).value());
 
         agent::llm::OpenAiLlmClientOptions cloud_options;
+        cloud_options.debug_payloads = config.llm.debug_payloads;
+        cloud_options.debug_payload_max_bytes = config.llm.debug_payload_max_bytes;
         cloud_options.base_url = config.llm.base_url;
         cloud_options.api_key = config.llm.api_key;
         cloud_options.default_model = config.llm.model;

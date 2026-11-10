@@ -25,6 +25,9 @@ struct OpenAiLlmClientOptions {
     // 默认 ChatCompletionsProtocol；同步/异步可以共享同一不可变协议或分别注入。
     std::shared_ptr<const ILlmProtocol> protocol;
     LlmStreamLimits stream_limits;
+    // 双重开关：仅显式开启且 logger 为 Debug 时记录对话与模型返回的 reasoning。
+    bool debug_payloads = false;
+    std::size_t debug_payload_max_bytes = 65536;
 };
 
 /// OpenAI-compatible LLM client.

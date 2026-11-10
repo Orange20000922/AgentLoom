@@ -30,6 +30,8 @@ void LlmConfigSection::LoadJson(const Json& root, MultimodalServerOptions& optio
 
     SetString(*section, Name(), "base_url", options.llm.base_url);
     SetBool(*section, Name(), "enabled", options.llm.enabled);
+    SetBool(*section, Name(), "debug_payloads", options.llm.debug_payloads);
+    SetSize(*section, Name(), "debug_payload_max_bytes", options.llm.debug_payload_max_bytes, 16, 16 * 1024 * 1024);
     SetString(*section, Name(), "api_key_env", options.llm.api_key_env);
     SetString(*section, Name(), "api_key_file", options.llm.api_key_file);
     SetString(*section, Name(), "model", options.llm.model);

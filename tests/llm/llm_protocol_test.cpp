@@ -1,6 +1,8 @@
 #include "llm_client.h"
 #include "llm_protocol.h"
 #include "openai_llm_client.h" // 同时验证旧头文件仍可取得公共类型。
+#include "../../tools/skill_experiment_protocol.h"
+#include <nlohmann/json.hpp>
 
 #include <gtest/gtest.h>
 
@@ -42,6 +44,39 @@ ChatCompletionRequest FixtureRequest() {
 
 // 固定旧 serializer 的完整字节输出；不通过新实现反向构造期望值。
 constexpr auto kRequestBody = R"({"max_tokens":128,"messages":[{"content":"规则\n","role":"system"},{"content":[{"text":"看图","type":"text"},{"image_url":{"url":"data:image/png;base64,aGVsbG8="},"type":"image_url"}],"role":"user"},{"content":null,"reasoning_content":"理由","role":"assistant","tool_calls":[{"function":{"arguments":"{\"q\":\"事实\"}","name":"lookup"},"id":"call-1","type":"function"}]},{"content":"{\"found\":true}","role":"tool","tool_call_id":"call-1"}],"model":"fixture-model","n":1,"parallel_tool_calls":false,"stream":false,"temperature":0.5,"tool_choice":"auto","tools":[{"function":{"description":"查事实","name":"lookup","parameters":{"properties":{"q":{"type":"string"}},"required":["q"],"type":"object"}},"type":"function"}],"top_p":0.75})";
+
+TEST(SkillExperimentProtocolTest, ThinkingIsTheOnlyWireDifferenceAndPreservesReasoningHistory) {
+    const auto request = FixtureRequest();
+    agent::tools::SkillExperimentProtocol enabled(true), disabled(false);
+    auto on = enabled.EncodeRequest(request, {"fixture-model", {}});
+    auto off = disabled.EncodeRequest(request, {"fixture-model", {}});
+    ASSERT_TRUE(on.ok()); ASSERT_TRUE(off.ok());
+    auto on_body = nlohmann::json::parse(on.value());
+    auto off_body = nlohmann::json::parse(off.value());
+    EXPECT_EQ(on_body["thinking"]["type"], "enabled");
+    EXPECT_EQ(off_body["thinking"]["type"], "disabled");
+    EXPECT_EQ(on_body["messages"][2]["reasoning_content"], "理由");
+    on_body.erase("thinking"); off_body.erase("thinking");
+    EXPECT_EQ(on_body, off_body);
+    on_body.erase("reasoning_effort");
+    EXPECT_EQ(on_body, nlohmann::json::parse(kRequestBody));
+}
+
+TEST(SkillExperimentProtocolTest, RetainsProductionValidationAndResponseSemantics) {
+    agent::tools::SkillExperimentProtocol protocol(true);
+    auto request = FixtureRequest();
+    request.tool_choice = "invalid";
+    EXPECT_FALSE(protocol.ValidateRequest(request).ok());
+    request.tool_choice = "required";
+    EXPECT_TRUE(protocol.ValidateRequest(request).ok());
+    auto logger = core::LoggerAdapter::ForModule("test");
+    auto result = protocol.DecodeResponse(kResponse, request, {}, logger);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.value().reasoning_content, "推理");
+    ASSERT_EQ(result.value().tool_calls.size(), 1u);
+    EXPECT_EQ(result.value().tool_calls[0].name, "lookup");
+    EXPECT_TRUE(protocol.CreateStreamDecoder(request, {}).ok());
+}
 
 TEST(ChatCompletionsProtocolTest, PreservesExactRequestBytesAndCompleteResponse) {
     const ChatCompletionsProtocol protocol;

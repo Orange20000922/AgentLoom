@@ -13,6 +13,7 @@
 - [Skill 工具契约与可信 Turn 输入](SKILL_TOOL_CONTRACTS.md)
 - [记忆上下文、必需工具与确定性预取](MEMORY_TOOL_RUNTIME.md)
 - [记忆与工具运行时验收](MEMORY_TOOL_ACCEPTANCE.md)
+- [工具欠调用诊断与分层验证](SKILL_TOOL_CALLING_DIAGNOSTICS_2026_11.md)
 - [GStreamer Windows Setup](../development/GSTREAMER_WINDOWS_SETUP.md)
 
 ## 模型与链路

@@ -22,7 +22,7 @@ Manifest 的工具暴露与执行配置：
 - `execution` 默认为 `model`。`prefetch` 仅允许显式 `read_only` 的查询工具；被召回或由 Always/必需策略选中后，在首轮 LLM 请求前执行。
 - 预取复用 executor、输入/输出 schema、调用授权、结果来源验证和大小限制。宿主通过 `ISkillToolPolicy::BindPrefetchArguments` 绑定可信查询参数，缺少 binder 时失败；不自动从用户文本拼装租户、权限或业务标识。
 - `ISkillToolPolicy::RequiredTools` 决定本轮必需的 `skill_id/version`。它是可信运行时策略，不从用户 JSON 或模型回复读取；必需项被加入本轮声明集合。
-- `model` 必需工具仍由模型发起。模型未调用、授权拒绝、执行失败或结果校验失败时，Turn 返回错误，不提交正常问答，不进入正常答案缓存。不额外提示模型重试。
+- `model` 必需工具仍由模型发起。尚有未满足的必需项时，请求发送 `tool_choice=required`；预取或工具执行满足全部要求后恢复 `auto`。`required` 仅要求至少调用一个工具，不能保证所有指定工具均已成功，因此仍保留逐项结果验收。模型未调用、授权拒绝、执行失败或结果校验失败时，Turn 返回错误，不提交正常问答，不进入正常答案缓存。不额外提示模型重试。
 - 选中的预取项同样要求成功；预取完成后发送合法的 assistant/tool 消息关联，并在同一次生成请求中提供工具结果。
 
 “始终声明”“始终注入数据”和“必须执行”分别由 manifest、可信上下文 provider、Turn policy 表达。它们不授予业务权限。只注册 Always 不能保证模型调用。

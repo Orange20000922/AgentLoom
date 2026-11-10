@@ -1,7 +1,3 @@
-# ClangD 配置，辅助 VS IntelliSense 找到生成的 protobuf 头文件
+# clangd 数据库由 windows/scripts/configure.ps1 -Ide 生成。
 CompileFlags:
-  Add:
-    - -ID:/Users/21405/source/repos/AgentBackendPredict/build/x64-Release
-    - -ID:/Users/21405/source/repos/AgentBackendPredict/build/x64-Debug
-    - -ID:/Users/21405/source/repos/vcpkg/installed/x64-windows/include
   CompilationDatabase: build-ide
