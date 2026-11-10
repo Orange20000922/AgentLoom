@@ -186,6 +186,7 @@ if(BERT_BUILD_TESTS)
         tests/llm/llm_stream_decoder_test.cpp
         tests/llm/llm_protocol_test.cpp
         tests/llm/openai_llm_client_test.cpp
+        tests/llm/llm_payload_trace_test.cpp
         tests/llm/cloud_task_coordinator_test.cpp
     )
     target_link_libraries(llm_tests PRIVATE

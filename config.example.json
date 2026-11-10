@@ -84,6 +84,8 @@
   },
   "llm": {
     "enabled": true,
+    "debug_payloads": false,
+    "debug_payload_max_bytes": 65536,
     "base_url": "https://api.deepseek.com/v1",
     "api_key_env": "AGENT_LLM_API_KEY",
     "api_key_file": "",

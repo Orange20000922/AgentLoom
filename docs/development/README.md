@@ -16,6 +16,11 @@
 
 配置前执行 `cmake --version` 和 `cmake --help`，确认 PATH 中解析到的 CMake 支持目标 generator。不要复用 VS2022/v143 build 目录。
 
+已有 Ninja/Makefiles IDE 缓存可使用 `windows/scripts/configure.ps1 -Ide`
+重新配置并生成 `build-ide/compile_commands.json`。该模式只 configure，保留缓存中的编译器和依赖配置，
+不执行编译或链接。可通过 `-BuildDir` 指定其他缓存，通过 `-ExtraCMakeArgs` 更新过期的 cache 项。
+clangd 的 `CompilationDatabase` 指向该目录；若需要 protobuf 头，另在本机 `.clangd` 中配置已有生成头目录。
+
 ## 2. Linux/WSL 隔离
 
 - Linux install root 使用 `build/linux-vcpkg-installed`；

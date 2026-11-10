@@ -24,6 +24,23 @@ AgentLoom 使用 JSON 配置、CLI override 和 section registry 组合加载 Se
 
 > 文档状态：当前配置入口说明。新增字段时以相应 `src/config/sections/*_section.cpp` 为实现真值，并同步更新 example JSON 和本文件。
 
+## LLM 请求与响应诊断
+
+`llm.debug_payloads` 默认为 `false`，`llm.debug_payload_max_bytes` 默认为 65536，
+配置范围为 16 到 16777216 字节。显式开启并将 logger 级别设为 Debug 后，
+OpenAI-compatible 同步、异步及 SSE 客户端通过 `llm-payload` logger 记录
+`encoded_request`、`raw_response` / `raw_sse`、`decoded_response` / `decode_error`。
+未注册该模块 logger 时使用默认 logger。进程内 `request_id` 关联同次请求及重试。
+
+日志包含请求消息、工具 schema、实际 `tool_choice`，以及上游返回的 content、tool_calls、
+reasoning_content 和 finish_reason；认证头不进入日志。上游未返回 reasoning 时记录 null，
+不通过额外提示要求模型输出隐藏推理。日志会包含对话内容，应仅在受控诊断中开启。
+超限记录按 UTF-8 边界保留首尾，并标记原始字节数和省略字节数；截断日志不能用于证明中间没有 DSML。
+SSE 在解码前收集有界原始字节，在请求终结时输出，支持跨 chunk 的多字节文本取证。
+
+诊断不改变协议返回值，也不把文本中的 DSML 自动转换成可执行工具。
+欠调用应区分缺参澄清、模型选择、上游泄漏与本地解析丢失；reasoning 的文字意图本身不能证明上游解析失败。
+
 ## HTTP 服务器配置
 
 ### JSON 配置
