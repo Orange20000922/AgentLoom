@@ -99,14 +99,14 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
             std::vector<llm::LlmStreamEvent> events;
         };
         auto pending = std::make_shared<PendingText>();
-        const bool defer_text = !request.tools.empty() && prepared.tool_round == 0;
+        const bool defer_text = !request.tools.empty();
         const bool requirements_pending = !agent::skill::ValidateSkillRequirements(prepared.tool_plan).ok();
         stream_sink = [sink = prepared.request.event_sink, pending, defer_text, requirements_pending,
                        generation = prepared.request.trace_id + ":generation:" + std::to_string(prepared.tool_round)](
                           const llm::LlmStreamEvent& source) {
             auto event = source;
             event.generation_id = generation;
-            // 有工具候选时，首轮文本暂存到完整调用已校验；工具轮的过渡文本不对外展示。
+            // 每个可能调用工具的生成轮都暂存文本，避免改写查询轮的过渡文字泄漏给用户。
             if (defer_text && event.kind == llm::LlmStreamEventKind::TextDelta) {
                 if (pending->events.size() >= 4096 || event.text.size() > 1024 * 1024 - pending->bytes)
                     return core::Status::Error(core::ErrorCode::ResourceExhausted, "provisional tool text exceeds buffer limit");
@@ -192,12 +192,12 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                 }
                 auto llm_completion = std::move(*result_holder).value();
                 if (!llm_completion.tool_calls.empty() &&
-                    skill_tool_coordinator_ && prepared_value.tool_round == 0) {
+                    skill_tool_coordinator_ && prepared_value.tool_round < options_.max_model_tool_rounds) {
                     if (prepared_value.request.stream) {
                         for (const auto& call : llm_completion.tool_calls) {
                             auto status = prepared_value.request.event_sink({
                                 .kind = llm::LlmStreamEventKind::ToolExecutionState,
-                                .generation_id = prepared_value.request.trace_id + ":generation:0",
+                                .generation_id = prepared_value.request.trace_id + ":generation:" + std::to_string(prepared_value.tool_round),
                                 .item_id = call.id, .text = "started", .tool_call = call});
                             if (!status.ok()) { completion(status); return; }
                         }
@@ -211,7 +211,7 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                     assistant.reasoning_content = llm_completion.reasoning_content;
                     assistant.tool_calls = llm_completion.tool_calls;
                     prepared_value.messages.push_back(std::move(assistant));
-                    prepared_value.tool_round = 1;
+                    ++prepared_value.tool_round;
                     const auto skill_context = ToolCallContext(session, prepared_value);
                     auto completion_holder =
                         std::make_shared<std::function<void(core::Result<CompletedChat>)>>(
@@ -224,7 +224,7 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
                         if (prepared.request.stream) {
                             auto status = prepared.request.event_sink({
                                 .kind = llm::LlmStreamEventKind::ToolExecutionState,
-                                .generation_id = prepared.request.trace_id + ":generation:0",
+                                .generation_id = prepared.request.trace_id + ":generation:" + std::to_string(prepared.tool_round - 1),
                                 .item_id = "tools", .text = tool_messages.ok() ? "completed" : "failed"});
                             if (!status.ok()) { (*completion_holder)(status); return; }
                         }
