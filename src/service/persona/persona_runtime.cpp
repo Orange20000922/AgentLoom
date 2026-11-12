@@ -945,8 +945,9 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
             return llm_result.status();
         }
         completion = std::move(llm_result).value();
-        // 同步阶段最多执行一轮工具调用；异步 continuation 保持后续扩展点。
-        if (!completion.tool_calls.empty() && skill_tool_coordinator_) {
+        // 与异步 continuation 共用有界轮数，每轮仍验收结果和累计上下文预算。
+        while (!completion.tool_calls.empty() && skill_tool_coordinator_ &&
+               prepared.tool_round < options_.max_model_tool_rounds) {
             prepared.prompt_tokens += completion.prompt_tokens;
             prepared.completion_tokens += completion.completion_tokens;
             prepared.total_tokens += completion.total_tokens;
@@ -967,7 +968,7 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
                     prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
                 !budget.ok()) return budget;
             llm_req.messages = prepared.messages;
-            prepared.tool_round = 1;
+            ++prepared.tool_round;
             ObservePrompt(prepared);
             auto follow_up = llm_client_->Complete(llm_req);
             ObserveLlmResult(prepared, follow_up.ok() ? &follow_up.value() : nullptr, follow_up.status());

@@ -304,6 +304,8 @@ struct PersonaRuntimeOptions {
     std::shared_ptr<const agent::skill::ISkillToolPolicy> skill_tool_policy;
     agent::skill::ToolResultFormat tool_result_format = agent::skill::ToolResultFormat::LegacyInline;
     std::size_t max_tool_result_bytes = 64 * 1024;
+    // 模型发起的工具往返上限；预取不计入。默认保留一次往返的兼容行为。
+    std::size_t max_model_tool_rounds = 1;
     std::shared_ptr<agent::skill::ISkillDeadlineScheduler> skill_deadline_scheduler;
     std::shared_ptr<const agent::skill::ISkillRegistry> skill_registry;
     ContextBudgets context_budgets;

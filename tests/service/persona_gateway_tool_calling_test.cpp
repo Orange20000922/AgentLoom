@@ -95,10 +95,10 @@ public:
         response.completion_tokens = 3;
         response.total_tokens = 14;
         response.finish_reason = "stop";
-        if (!skip_tools && (requests_.size() == 1 || repeat_tool_calls)) {
+        if (!skip_tools && (requests_.size() <= tool_rounds || repeat_tool_calls)) {
             response.content = "tool planning text";
             response.reasoning_content = "tool planning reasoning";
-            response.tool_calls.push_back({kCall, "test_lookup", "{}"});
+            response.tool_calls.push_back({requests_.size() == 1 ? std::string(kCall) : std::string(kCall) + "-" + std::to_string(requests_.size()), "test_lookup", "{}"});
         } else {
             response.content = "grounded final reply";
         }
@@ -143,6 +143,7 @@ public:
     std::atomic<int> async_calls{0};
     bool repeat_tool_calls = false;
     bool skip_tools = false;
+    std::size_t tool_rounds = 1;
 private:
     mutable std::mutex mutex_;
     std::vector<llm::ChatCompletionRequest> requests_;
@@ -692,6 +693,38 @@ TEST_P(RequiredToolRuntimeTest, RequiredContextAndResultBudgetsFailWithSourceDia
         EXPECT_EQ(harness.memory->admissions, 0);
         ASSERT_EQ(observer->turns.size(), 1u);
         EXPECT_GT(observer->turns[0].context.input_bytes[static_cast<std::size_t>(persona::ContextSource::L4)], 0u);
+    }
+}
+
+TEST_P(RequiredToolRuntimeTest, BoundedModelRoundsAllowRewriteAndStopAtConfiguredLimit) {
+    for (const std::size_t limit : {1U, 2U}) {
+        Harness harness;
+        harness.llm_client->tool_rounds = 2;
+        auto options = harness.Options();
+        options.runtime.max_model_tool_rounds = limit;
+        gateway::PersonaGatewayServer server(options, harness.Dependencies(GetParam() != 0));
+        ASSERT_TRUE(server.Start().ok());
+        CreateSession(server);
+        gateway::ChatGatewayRequest request;
+        request.session_id = kSession;
+        request.authenticated_user_uuid = kUser;
+        request.message = "rewrite lookup";
+        request.stream = GetParam() == 2;
+        std::string text;
+        request.event_sink = [&](const auto& event) {
+            if (event.kind == llm::LlmStreamEventKind::TextDelta) text += event.text;
+            return core::Status::Ok();
+        };
+        std::promise<core::Status> completed;
+        auto future = completed.get_future();
+        ASSERT_TRUE(server.service().SubmitChat(request, [&](auto result) { completed.set_value(result.status()); }).ok());
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        const auto status = future.get();
+        EXPECT_EQ(status.ok(), limit == 2);
+        EXPECT_EQ(harness.executor->starts, limit);
+        EXPECT_EQ(harness.llm_client->Requests().size(), limit + 1);
+        EXPECT_EQ(harness.memory->admissions, limit == 2 ? 1 : 0);
+        if (request.stream) EXPECT_EQ(text, limit == 2 ? "grounded final reply" : "");
     }
 }
 
