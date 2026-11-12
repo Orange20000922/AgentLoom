@@ -935,7 +935,9 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
         llm_req.max_tokens = prepared.generation.max_tokens;
         llm_req.top_p = static_cast<float>(prepared.generation.top_p);
         llm_req.tools = prepared.tools;
-        if (!llm_req.tools.empty()) llm_req.tool_choice = "auto";
+        // 必需工具尚未完成时向 Provider 发出强制约束；Always/Recall 本身只控制可见性。
+        if (!llm_req.tools.empty()) llm_req.tool_choice =
+            skill::ValidateSkillRequirements(prepared.tool_plan).ok() ? "auto" : "required";
 
         ObservePrompt(prepared);
         auto llm_result = llm_client_->Complete(llm_req);
@@ -968,6 +970,7 @@ core::Result<ChatResponse> PersonaRuntime::CompleteWithLlm(SessionState& session
                     prepared.messages, prepared.tools, session.session_id, prepared.request.trace_id);
                 !budget.ok()) return budget;
             llm_req.messages = prepared.messages;
+            llm_req.tool_choice = llm_req.tools.empty() ? "" : "auto";
             ++prepared.tool_round;
             ObservePrompt(prepared);
             auto follow_up = llm_client_->Complete(llm_req);

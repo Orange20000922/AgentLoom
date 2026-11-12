@@ -87,7 +87,9 @@ core::Status PersonaRuntime::CompleteWithLlmAsync(
     request.max_tokens = prepared.generation.max_tokens;
     request.top_p = static_cast<float>(prepared.generation.top_p);
     request.tools = prepared.tools;
-    if (!request.tools.empty()) request.tool_choice = "auto";
+    // 每轮重算，Prefetch 或工具执行满足要求后恢复 auto，避免 follow-up 被迫继续调用。
+    if (!request.tools.empty()) request.tool_choice =
+        skill::ValidateSkillRequirements(prepared.tool_plan).ok() ? "auto" : "required";
     request.stream = prepared.request.stream;
     llm::LlmEventSink stream_sink;
     if (request.stream) {

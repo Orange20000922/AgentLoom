@@ -102,7 +102,7 @@ LLM 首轮（tool_round=0）
 - **真实 executor 未接入**：`ISkillExecutor` 目前只有测试实现，业务工具（查 RAG/图谱/画像）需下游实现并注册。
 - **provenance 链路未落地**：`SkillResult.provenance_json` 字段已声明但未在 `MakeToolResultMessage` 中并入输出，`kb_version`/`evidence_state` 尚需接线。
 - **manifest 并发/确认语义未执行**：`execution_mode`、`max_parallel_per_session`、`requires_confirmation` 目前仅声明与校验，运行时未消费。
-- **LLM 工具路由未达标**：召回 100% 后，LLM 对已注入工具的选择仍为 8/11，存在欠调用与误路由，属工具描述/指令的 prompt 工程问题，与召回机制解耦。
+- **LLM 工具路由未达标**：历史记录中召回 100% 后，目标工具命中为 8/11。该记录缺少原始响应，不能直接归因于 prompt 或 DSML。2026-11 分层复测发现缺参澄清、测试与生产召回阈值不一致，以及必需工具请求未使用协议强制；见[诊断与验证](../runtime/SKILL_TOOL_CALLING_DIAGNOSTICS_2026_11.md)。
 - **关键词正则的否定需显式配置**：否定排除依赖人工维护 `negative_keywords`，覆盖不足时仍可能误触发。
 
 ## 5. 使用方法（下游接入指南）

@@ -16,6 +16,8 @@ param(
     [switch]$Media,
     [switch]$LocalLlm,
     [switch]$GPU,
+    [switch]$Ide,
+    [string[]]$ExtraCMakeArgs = @(),
     [string]$Triplet = "x64-windows-release",
     [string]$Generator = "Visual Studio 18 2026",
     [string]$LlamaCppRoot,
@@ -31,6 +33,17 @@ Set-StrictMode -Version Latest
 $ScriptDir = $PSScriptRoot
 $WindowsDir = Split-Path -Parent $ScriptDir
 $RepoRoot = Split-Path -Parent $WindowsDir
+
+# IDE 只重新配置已有缓存并导出数据库，不构建、不替换编译器或本机依赖路径。
+if ($Ide) {
+    if (-not $PSBoundParameters.ContainsKey('BuildDir')) { $BuildDir = 'build-ide' }
+    $ideDirectory = Join-Path $RepoRoot $BuildDir
+    if (-not (Test-Path -LiteralPath (Join-Path $ideDirectory 'CMakeCache.txt'))) {
+        throw 'IDE mode requires an existing Ninja/Makefiles CMake cache.'
+    }
+    & cmake -S $RepoRoot -B $ideDirectory -DCMAKE_EXPORT_COMPILE_COMMANDS=ON @ExtraCMakeArgs
+    exit $LASTEXITCODE
+}
 
 $DepsDir = Join-Path $RepoRoot "deps"
 $BuildMedia = $Media -or $Inference
@@ -208,7 +221,7 @@ Write-Log ""
 
 Push-Location $RepoRoot
 try {
-    & cmake @cmakeArgs
+    & cmake @cmakeArgs @ExtraCMakeArgs
 
     if ($LASTEXITCODE -ne 0) {
         Write-Error-Log "CMake configuration failed with exit code $LASTEXITCODE"

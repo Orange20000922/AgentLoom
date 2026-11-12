@@ -14,6 +14,7 @@ param(
     [string]$BuildDir = "build\x64-Release-Cold",
     [string]$Config = "Release",
     [string]$Label,
+    [string]$Include,
     [string]$Exclude,
     [string]$ExcludeLabel,
     [switch]$SkipPackage
@@ -75,6 +76,7 @@ try {
     if ($Label) {
         $ctestArgs += "-L", $Label
     }
+    if ($Include) { $ctestArgs += "-R", $Include }
 
     if ($Exclude) {
         $ctestArgs += "-E", $Exclude

@@ -612,6 +612,8 @@ TEST(ConfigLlmSectionTest, JsonConfigLoadsLlmSection) {
             "http_max_idle_connections": 96,
             "http_max_idle_connections_per_origin": 48,
             "http_idle_timeout_ms": 45000,
+            "debug_payloads": true,
+            "debug_payload_max_bytes": 8192,
             "disable_tls_verify_on_windows": false,
             "ca_bundle_path": "certs/mozilla-ca-bundle.pem",
             "prompts": {
@@ -636,6 +638,8 @@ TEST(ConfigLlmSectionTest, JsonConfigLoadsLlmSection) {
     EXPECT_EQ(opts.llm.http_max_idle_connections, 96u);
     EXPECT_EQ(opts.llm.http_max_idle_connections_per_origin, 48u);
     EXPECT_EQ(opts.llm.http_idle_timeout_ms, 45000);
+    EXPECT_TRUE(opts.llm.debug_payloads);
+    EXPECT_EQ(opts.llm.debug_payload_max_bytes, 8192u);
     EXPECT_EQ(opts.llm.api_key, "sk-json-test");
     EXPECT_FALSE(opts.llm.disable_tls_verify_on_windows);
     EXPECT_EQ(opts.llm.ca_bundle_path, "certs/mozilla-ca-bundle.pem");
