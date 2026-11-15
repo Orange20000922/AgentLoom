@@ -1,3 +1,0 @@
-# clangd 数据库由 windows/scripts/configure.ps1 -Ide 生成。
-CompileFlags:
-  CompilationDatabase: build-ide

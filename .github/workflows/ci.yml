@@ -79,6 +79,9 @@ jobs:
       - name: Test whole archive link helper
         run: python tests/tools/whole_archive_cmake_test.py
 
+      - name: Test CI inventory validation
+        run: python tests/tools/ci_test_inventory_test.py
+
       - name: Report runner resources
         shell: bash
         run: |
@@ -369,9 +372,10 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
+          python .github/scripts/verify-ci-tests.py --build-dir "$BUILD_DIR"
           ctest --test-dir "$BUILD_DIR" -C Release \
             -L ci -E "(ReloadBatchCycle|RedisV2Batches)" \
-            --output-on-failure
+            --output-on-failure --no-tests=error
 
       - name: Verify installed package consumer
         shell: bash

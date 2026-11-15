@@ -21,6 +21,12 @@
 不执行编译或链接。可通过 `-BuildDir` 指定其他缓存，通过 `-ExtraCMakeArgs` 更新过期的 cache 项。
 clangd 的 `CompilationDatabase` 指向该目录；若需要 protobuf 头，另在本机 `.clangd` 中配置已有生成头目录。
 
+首次使用可复制 `.clangd.example` 为被忽略的 `.clangd`。MSBuild 不导出该数据库，
+因此 IDE 的 Ninja/Makefiles 缓存与实际 MSVC 构建目录可以独立；不要仅凭 IDE 缓存编译器判断真实构建工具链。
+Boost 1.85 的 Asio 在 Windows/MSVC 特性检测分支排除了 `__clang__`，会让 clangd
+看不到 `awaitable`、`co_spawn` 和 `use_awaitable`。本项目已使用 C++20，示例仅给 clangd
+添加 `BOOST_ASIO_HAS_CO_AWAIT=1`，不修改生产目标宏、不屏蔽语义诊断；`<coroutine>` 和标准库支持仍须来自有效编译参数。
+
 ## 2. Linux/WSL 隔离
 
 - Linux install root 使用 `build/linux-vcpkg-installed`；

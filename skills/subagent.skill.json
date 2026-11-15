@@ -1,0 +1,32 @@
+{
+  "skill_id": "agent.spawn",
+  "tool_name": "spawn_agent",
+  "version": "1",
+  "kind": "native",
+  "exposure": "always",
+  "description": "委派一个边界清晰的检索或分析任务给子代理，等待完成后取得其证据和结论。",
+  "prompt_instruction": "用户明确要求子代理或委派研究时，调用 spawn_agent。task 必须包含完整任务、已知业务标识和预期输出。子代理可使用宿主提供的私有查询工具；主代理不应猜测查询结果。timeout_ms 只是请求时限，宿主会限制它。收到结果后向用户报告结论和证据；失败时如实说明，不伪造完成。普通闲聊不要委派。",
+  "keywords": ["子代理", "委派", "subagent", "delegate"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "task": {"type": "string", "minLength": 1, "maxLength": 32768},
+      "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 3600000}
+    },
+    "required": ["task", "timeout_ms"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "run_id": {"type": "string"},
+      "summary": {"type": "string"},
+      "model_requests": {"type": "integer"},
+      "tool_calls": {"type": "integer"},
+      "total_tokens": {"type": "integer"}
+    },
+    "required": ["run_id", "summary", "model_requests", "tool_calls", "total_tokens"],
+    "additionalProperties": false
+  },
+  "executor": {"type": "native", "reference": "agent.spawn"}
+}
