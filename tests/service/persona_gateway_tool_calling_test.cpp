@@ -2,6 +2,10 @@
 #include "beast_http_client.h"
 #include "llm_protocol.h"
 #include "../../src/skill/skill_executor.h"
+#include "../../src/service/agent/agent_task_runtime.h"
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+#include <thread>
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -363,6 +367,114 @@ TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
 }
 
 INSTANTIATE_TEST_SUITE_P(SyncAndAsync, GatewayToolCallingTest, testing::Bool());
+
+// 真实 HTTP → Persona → spawn → 独立子任务 → 两轮查询 → 主代理最终回答。
+// 模型使用确定性夹具；验证运行时闭环，不把它计作真实模型质量实验。
+TEST(GatewaySubagentE2E, HttpDelegationCommitsOnlyParentTurn) {
+    class DelegatingLlm final : public llm::ILlmClient, public llm::IAsyncLlmClient {
+    public:
+        core::Result<llm::ChatCompletionResponse> Complete(const llm::ChatCompletionRequest& request) override {
+            llm::ChatCompletionResponse result;
+            const auto observations = std::count_if(request.messages.begin(), request.messages.end(),
+                [](const auto& message) { return message.role == llm::ChatRole::Tool; });
+            const bool child = std::any_of(request.tools.begin(), request.tools.end(),
+                [](const auto& tool) { return tool.name == "complete_task"; });
+            if (child) {
+                if (observations < 2)
+                    result.tool_calls.push_back({"query-" + std::to_string(observations), "test_lookup", "{}"});
+                else result.tool_calls.push_back({"finish", "complete_task", R"({"summary":"verified child evidence"})"});
+            } else if (!observations) {
+                result.tool_calls.push_back({"delegate", "spawn_agent", R"({"task":"retrieve and verify evidence","timeout_ms":5000})"});
+            } else {
+                EXPECT_NE(request.messages.back().content.find("verified child evidence"), std::string::npos);
+                result.content = "grounded parent reply";
+            }
+            return result;
+        }
+        core::Result<std::shared_ptr<llm::IAsyncLlmOperation>> CompleteAsync(
+            llm::ChatCompletionRequest request, Callback callback) override {
+            class Operation final : public llm::IAsyncLlmOperation { public: void Cancel() noexcept override {} };
+            callback(Complete(request));
+            return std::shared_ptr<llm::IAsyncLlmOperation>(std::make_shared<Operation>());
+        }
+    };
+    class Context final : public agent::runtime::ISubagentContextProvider {
+    public:
+        core::Result<agent::runtime::AgentTaskRequest> Prepare(const skill::SkillExecutionRequest&) const override {
+            agent::runtime::AgentTaskRequest request;
+            request.allowed_skill_ids = {kSkill};
+            return request;
+        }
+    };
+    struct ChildHost {
+        boost::asio::io_context io;
+        boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard{io.get_executor()};
+        std::shared_ptr<core::ThreadPool> pool = std::make_shared<core::ThreadPool>(
+            core::ThreadPoolOptions{.worker_count = 1});
+        std::shared_ptr<agent::runtime::AgentTaskRuntime> runtime;
+        std::jthread thread;
+        ChildHost() : thread([this] { io.run(); }) {}
+        ~ChildHost() {
+            if (runtime) runtime->Close();
+            pool->Shutdown(true);
+            guard.reset(); io.stop();
+        }
+    } child;
+    ASSERT_TRUE(child.pool->Start().ok());
+    Harness harness;
+    auto model = std::make_shared<DelegatingLlm>();
+    agent::runtime::AgentTaskOptions task_options;
+    task_options.model = "subagent-fixture";
+    child.runtime = std::make_shared<agent::runtime::AgentTaskRuntime>(model, harness.registry,
+        harness.factory, skill::MakeSkillDeadlineScheduler(child.io.get_executor(), *child.pool), child.pool, task_options);
+    auto parent_registry = std::make_shared<skill::InMemorySkillRegistry>();
+    ASSERT_TRUE(parent_registry->Register(agent::runtime::SubagentSkillManifest()).ok());
+    auto parent_factory = std::make_shared<skill::InMemorySkillExecutorFactory>();
+    ASSERT_TRUE(parent_factory->RegisterReference("native", "agent.spawn",
+        std::make_shared<agent::runtime::SubagentSkillExecutor>(child.runtime, std::make_shared<Context>())).ok());
+    auto dependencies = harness.Dependencies(true);
+    dependencies.llm_client = model; dependencies.async_llm_client = model;
+    dependencies.skill_registry = parent_registry;
+    dependencies.skill_executor_factory = parent_factory;
+    dependencies.tool_memory_provider.reset();
+    TestAuthDatabase database;
+    auto options = harness.Options();
+    auto keys = gateway::GenerateDevelopmentRsaKeyPair();
+    ASSERT_TRUE(keys.ok());
+    options.auth.enabled = true;
+    options.auth.require_auth_for_api = true;
+    options.auth.allow_dev_identity = false;
+    options.auth.enable_dev_registration = true;
+    options.auth.public_key_pem = keys.value().public_key_pem;
+    options.auth.private_key_pem = keys.value().private_key_pem;
+    options.auth.session_database_path = database.path.string();
+    gateway::PersonaGatewayServer server(options, std::move(dependencies));
+    ASSERT_TRUE(server.Start().ok());
+    auto client = agent::net::BeastHttpClient::Create({});
+    ASSERT_TRUE(client.ok());
+    std::string cookie;
+    auto post = [&](std::string target, Json body) {
+        agent::net::HttpClientRequest request;
+        request.url = "http://127.0.0.1:" + std::to_string(server.port()) + target;
+        request.headers.push_back({"Content-Type", "application/json"});
+        if (!cookie.empty()) request.headers.push_back({"Cookie", cookie});
+        request.body = body.dump(); request.timeout_ms = 5000;
+        return client.value()->Execute(request);
+    };
+    auto auth = post("/api/auth/register", {{"userUuid", kUser}, {"ttlSeconds", 60}});
+    ASSERT_TRUE(auth.ok()); ASSERT_EQ(auth.value().status, 200);
+    for (const auto& header : auth.value().headers) if (header.name == "Set-Cookie") cookie = header.value;
+    ASSERT_FALSE(cookie.empty());
+    auto create = post("/api/session/create", {{"sessionId", kSession}, {"personaId", "tool-persona"}});
+    ASSERT_TRUE(create.ok()); ASSERT_EQ(create.value().status, 200);
+    auto reply = post("/api/chat/message", {{"sessionId", kSession}, {"message", "delegate evidence research"}});
+    ASSERT_TRUE(reply.ok()); ASSERT_EQ(reply.value().status, 200) << reply.value().body;
+    EXPECT_EQ(Json::parse(reply.value().body).at("data").at("reply").at("content"), "grounded parent reply");
+    EXPECT_EQ(harness.executor->starts, 2);
+    EXPECT_EQ(harness.memory->admissions, 1);
+    auto snapshot = server.sessions().GetSessionSnapshot(kSession);
+    ASSERT_TRUE(snapshot.ok()); EXPECT_EQ(snapshot.value().recent_turn_count, 1U);
+}
 
 class DenyingPolicy final : public skill::ISkillToolPolicy {
 public:

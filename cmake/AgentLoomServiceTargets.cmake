@@ -17,6 +17,9 @@ target_link_libraries(agent_service_core INTERFACE
 )
 
 add_library(agent_agent_runtime STATIC
+    src/service/agent/agent_task_runtime.cpp
+    src/service/agent/agent_task_runtime.h
+    src/service/agent/subagent_skill_executor.cpp
     src/service/persona/persona_algorithm.cpp
     src/service/persona/persona_algorithm.h
     src/service/persona/session_manager.cpp
@@ -382,6 +385,7 @@ if(BERT_BUILD_TESTS)
     endfunction()
 
     add_executable(persona_runtime_tests
+        tests/service/agent_task_runtime_test.cpp
         tests/service/persona_algorithm_test.cpp
         tests/service/session_persistence_contract_test.cpp
         tests/service/persona_runtime_test.cpp
