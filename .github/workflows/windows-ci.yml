@@ -98,6 +98,9 @@ jobs:
       - name: Test whole archive link helper
         run: python tests/tools/whole_archive_cmake_test.py
 
+      - name: Test CI inventory validation
+        run: python tests/tools/ci_test_inventory_test.py
+
       - name: Report runner resources
         shell: pwsh
         run: |
@@ -383,6 +386,7 @@ jobs:
             -DBERT_MKL_RUNTIME_ROOT="$env:GITHUB_WORKSPACE\$env:MKL_ROOT" `
             -DAGENTLOOM_BUILD_LOCAL_LLM=OFF `
             -DAGENTLOOM_BUILD_MEDIA=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed: $LASTEXITCODE" }
 
       - name: Build SDK and test targets
         shell: pwsh
@@ -409,6 +413,9 @@ jobs:
             async_grpc_runtime_tests `
             --parallel
 
+          # 原生命令的失败不会自动终止 pwsh，不能被后面的 sccache 成功退出覆盖。
+          if ($LASTEXITCODE -ne 0) { throw "CMake build failed: $LASTEXITCODE" }
+
           sccache --show-stats
 
       - name: Save compiler outputs
@@ -421,9 +428,11 @@ jobs:
       - name: Run tests
         shell: pwsh
         run: |
+          python .github/scripts/verify-ci-tests.py --build-dir $env:BUILD_DIR
+          if ($LASTEXITCODE -ne 0) { throw "CI test inventory incomplete: $LASTEXITCODE" }
           ctest --test-dir $env:BUILD_DIR -C Release `
             -L ci -E "(ReloadBatchCycle|RedisV2Batches)" `
-            --output-on-failure
+            --output-on-failure --no-tests=error
 
       - name: Verify installed package consumer
         shell: pwsh

@@ -33,7 +33,7 @@ class IL0RecordSource {
 public:
     virtual ~IL0RecordSource() = default;
 
-    /// 按完整 owner 和本地业务日期读取 L0；实现不得把 Redis key 文本当作记录事实。
+    /// 按完整 owner 和本地业务日期读取 L0。
     virtual core::Result<std::vector<storage::CacheRecord>> ListDailyRecords(
         const MemoryOwner& owner,
         std::string_view date,
