@@ -29,18 +29,7 @@ if [[ -d "$FAISS_ROOT" ]] &&
     rm -rf "$FAISS_ROOT"
 fi
 
-if [[ ! -d "$ONNXRUNTIME_ROOT" ]]; then
-    log "downloading ONNX Runtime $ONNXRUNTIME_VERSION"
-    archive="$DEPS_DIR/onnxruntime-linux-x64-$ONNXRUNTIME_VERSION.tgz"
-    ensure_tgz "$ONNXRUNTIME_URL" "$archive"
-    tar -xzf "$archive" -C "$DEPS_DIR"
-else
-    log "ONNX Runtime already present at $ONNXRUNTIME_ROOT"
-fi
-if [[ ! -s "$ONNXRUNTIME_ROOT/lib/libonnxruntime.so" && -s "$ONNXRUNTIME_ROOT/lib/libonnxruntime.so.$ONNXRUNTIME_VERSION" ]]; then
-    log "repairing ONNX Runtime libonnxruntime.so symlink placeholder"
-    cp "$ONNXRUNTIME_ROOT/lib/libonnxruntime.so.$ONNXRUNTIME_VERSION" "$ONNXRUNTIME_ROOT/lib/libonnxruntime.so"
-fi
+bash "$REPO_ROOT/.github/scripts/download-onnxruntime.sh" "$DEPS_DIR" "$ONNXRUNTIME_VERSION"
 
 if [[ ! -d "$SQLITE_ROOT" ]]; then
     log "downloading SQLite amalgamation $SQLITE_VERSION"

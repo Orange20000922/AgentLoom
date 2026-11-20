@@ -44,8 +44,7 @@ jobs:
             triplet: x64-linux-release
             build_dir: build/gha-linux
             artifact_dir: build/gha-linux
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz
-            ort_archive: deps/onnxruntime-linux-x64-1.17.1.tgz
+            ort_archive: deps/microsoft.ml.onnxruntime.1.17.1.zip
             ort_root: deps/onnxruntime-linux-x64-1.17.1
             package_name: bert-inference-linux-x64.tar.gz
 
@@ -161,13 +160,7 @@ jobs:
 
       - name: Download ONNX Runtime
         shell: bash
-        run: |
-          chmod +x .github/scripts/download-onnxruntime.sh
-          ./.github/scripts/download-onnxruntime.sh \
-            "${{ matrix.ort_url }}" \
-            "${{ github.workspace }}/${{ matrix.ort_archive }}" \
-            "${{ github.workspace }}/deps" \
-            "${{ github.workspace }}/${{ matrix.ort_root }}"
+        run: bash .github/scripts/download-onnxruntime.sh "$GITHUB_WORKSPACE/deps"
 
       - name: Configure
         shell: bash
