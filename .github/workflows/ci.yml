@@ -41,8 +41,6 @@ jobs:
       CCACHE_CACHE_VERSION: v2
       MIN_FREE_DISK_GIB: 35
       DEPS_CACHE_VERSION: v2
-      ONNXRUNTIME_URL: https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz
-      ONNXRUNTIME_ARCHIVE: deps/onnxruntime-linux-x64-1.17.1.tgz
       ONNXRUNTIME_ROOT: deps/onnxruntime-linux-x64-1.17.1
       SQLITE_AMALGAMATION_URL: https://www.sqlite.org/2026/sqlite-amalgamation-3530100.zip
       FAISS_CONDA_URL: https://conda.anaconda.org/conda-forge/linux-64/libfaiss-1.10.0-cpu_openblas_hfcc2109_0.conda
@@ -199,13 +197,7 @@ jobs:
 
       - name: Download ONNX Runtime
         shell: bash
-        run: |
-          chmod +x .github/scripts/download-onnxruntime.sh
-          ./.github/scripts/download-onnxruntime.sh \
-            "$ONNXRUNTIME_URL" \
-            "$GITHUB_WORKSPACE/$ONNXRUNTIME_ARCHIVE" \
-            "$GITHUB_WORKSPACE/deps" \
-            "$GITHUB_WORKSPACE/$ONNXRUNTIME_ROOT"
+        run: bash .github/scripts/download-onnxruntime.sh "$GITHUB_WORKSPACE/deps"
 
       - name: Prepare Linux binary dependencies
         shell: bash
