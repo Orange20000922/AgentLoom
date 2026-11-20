@@ -54,6 +54,7 @@ struct HttpRouteContext {
     std::string trace_id;
     std::vector<std::string> path_parts;
     std::unordered_map<std::string, std::string> path_params;
+    std::function<void(std::shared_ptr<::net::IHttpRequest>)> forward_jev;
 };
 
 struct WsRouteContext {

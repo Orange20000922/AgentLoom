@@ -19,9 +19,9 @@ namespace {
 // 诊断只观察线协议，不推断或补造工具调用。单次请求 ID 串联重试及解码前后记录。
 class PayloadTrace {
 public:
-    explicit PayloadTrace(const OpenAiLlmClientOptions& options)
+    PayloadTrace(const OpenAiLlmClientOptions& options, const ChatCompletionRequest& request)
         : logger_(core::LoggerAdapter::ForModule("llm-payload")),
-          enabled_(options.debug_payloads && logger_.valid() &&
+          enabled_(!request.jev && options.debug_payloads && logger_.valid() &&
                    logger_.get()->should_log(spdlog::level::debug)),
           limit_(std::max<std::size_t>(16, options.debug_payload_max_bytes)), id_(next_id_.fetch_add(1)) {}
 
@@ -130,7 +130,7 @@ core::Result<ChatCompletionResponse> DecodeHttpResponse(
             code = core::ErrorCode::Unavailable;
         }
         return core::Status(code,
-            "LLM API returned status " + std::to_string(status_code) + ": " + body);
+            "LLM API returned status " + std::to_string(status_code) + (request.jev ? "" : ": " + body));
     }
 
     const LlmProtocolContext context{options.default_model, options.response_validation};
@@ -198,7 +198,7 @@ core::Result<ChatCompletionResponse> OpenAiLlmClient::Complete(
 core::Result<ChatCompletionResponse> OpenAiLlmClient::ExecuteWithRetry(
     const ChatCompletionRequest& req) {
 
-    PayloadTrace trace(options_);
+    PayloadTrace trace(options_, req);
     auto built = BuildHttpRequest(options_, req, trace);
     if (!built.ok()) return built.status();
     auto http_req = std::move(built).value();
@@ -640,7 +640,7 @@ core::Result<std::shared_ptr<IAsyncLlmOperation>> OpenAiAsyncLlmClient::SubmitCo
             impl_->logger.warn("LLM request rejected: {}", status.message());
             return status;
         }
-        PayloadTrace trace(impl_->options);
+        PayloadTrace trace(impl_->options, request);
         auto built = BuildHttpRequest(impl_->options, request, trace);
         if (!built.ok()) return built.status();
         std::unique_ptr<ILlmStreamDecoder> decoder;

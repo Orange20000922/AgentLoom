@@ -319,10 +319,11 @@ public:
     std::filesystem::path path;
 };
 
-TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
+void CheckHttpToolTurn(bool async, bool openai) {
     Harness harness;
     TestAuthDatabase database;
     auto options = harness.Options();
+    options.enable_llm_dev_routes = openai;
     auto keys = gateway::GenerateDevelopmentRsaKeyPair();
     ASSERT_TRUE(keys.ok()) << keys.status().message();
     options.auth.enabled = true;
@@ -332,7 +333,7 @@ TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
     options.auth.public_key_pem = keys.value().public_key_pem;
     options.auth.private_key_pem = keys.value().private_key_pem;
     options.auth.session_database_path = database.path.string();
-    gateway::PersonaGatewayServer server(std::move(options), harness.Dependencies(GetParam()));
+    gateway::PersonaGatewayServer server(std::move(options), harness.Dependencies(async));
     ASSERT_TRUE(server.Start().ok());
     auto client = agent::net::BeastHttpClient::Create({});
     ASSERT_TRUE(client.ok());
@@ -342,6 +343,10 @@ TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
         request.url = "http://127.0.0.1:" + std::to_string(server.port()) + std::string(target);
         request.headers.push_back({"Content-Type", "application/json"});
         if (!cookie.empty()) request.headers.push_back({"Cookie", cookie});
+        if (target == "/v1/chat/completions") {
+            request.headers.push_back({"X-Session-Id", kSession});
+            request.headers.push_back({"X-Persona-Id", "tool-persona"});
+        }
         request.body = body.dump();
         request.timeout_ms = 5000;
         return client.value()->Execute(request);
@@ -356,14 +361,29 @@ TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
     auto create = post("/api/session/create", {{"sessionId", kSession}, {"personaId", "tool-persona"}});
     ASSERT_TRUE(create.ok()) << create.status().message();
     ASSERT_EQ(create.value().status, 200) << create.value().body;
-    auto chat = post("/api/chat/message", {{"sessionId", kSession}, {"message", "retrieve the fact"}});
+    auto chat = openai ? post("/v1/chat/completions", {
+        {"model", "test"}, {"messages", Json::array({{{"role","user"},{"content","retrieve the fact"}}})}
+    }) : post("/api/chat/message", {{"sessionId", kSession}, {"message", "retrieve the fact"}});
     ASSERT_TRUE(chat.ok()) << chat.status().message();
     ASSERT_EQ(chat.value().status, 200) << chat.value().body;
     const auto body = Json::parse(chat.value().body);
-    EXPECT_TRUE(body.at("ok").get<bool>());
-    EXPECT_EQ(body.at("data").at("reply").at("content"), "grounded final reply");
-    EXPECT_EQ(body.at("data").at("turnIndex"), 1);
-    harness.CheckFollowUp(GetParam());
+    if (openai) {
+        EXPECT_EQ(body.at("object"), "chat.completion");
+        EXPECT_EQ(body.at("choices").at(0).at("message").at("content"), "grounded final reply");
+    } else {
+        EXPECT_TRUE(body.at("ok").get<bool>());
+        EXPECT_EQ(body.at("data").at("reply").at("content"), "grounded final reply");
+        EXPECT_EQ(body.at("data").at("turnIndex"), 1);
+    }
+    harness.CheckFollowUp(async);
+}
+
+TEST_P(GatewayToolCallingTest, HttpChatRunsToolAndReturnsGroundedFollowUp) {
+    CheckHttpToolTurn(GetParam(), false);
+}
+
+TEST_P(GatewayToolCallingTest, OpenAiChatRunsToolAndReturnsGroundedFollowUp) {
+    CheckHttpToolTurn(GetParam(), true);
 }
 
 INSTANTIATE_TEST_SUITE_P(SyncAndAsync, GatewayToolCallingTest, testing::Bool());

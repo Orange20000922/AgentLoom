@@ -83,30 +83,40 @@
     "generate_dev_keys": true
   },
   "llm": {
-    "enabled": true,
-    "debug_payloads": false,
-    "debug_payload_max_bytes": 65536,
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key_env": "AGENT_LLM_API_KEY",
-    "api_key_file": "",
-    "model": "deepseek-chat",
-    "timeout_ms": 30000,
-    "max_retries": 2,
-    "async_http_io_threads": 4,
-    "http_keep_alive": true,
-    "http_max_idle_connections": 128,
-    "http_max_idle_connections_per_origin": 64,
-    "http_idle_timeout_ms": 30000,
-    "response_validation": {
-      "token_count_mode": "off",
-      "tokenizer_path": "",
-      "tokenizer_model": "deepseek-chat",
-      "max_token_difference": 2
+    "enable_dev_routes": false,
+    "openai": {
+      "enabled": true,
+      "debug_payloads": false,
+      "debug_payload_max_bytes": 65536,
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "AGENT_LLM_API_KEY",
+      "api_key_file": "",
+      "model": "deepseek-chat",
+      "timeout_ms": 30000,
+      "max_retries": 2,
+      "async_http_io_threads": 4,
+      "http_keep_alive": true,
+      "http_max_idle_connections": 128,
+      "http_max_idle_connections_per_origin": 64,
+      "http_idle_timeout_ms": 30000,
+      "response_validation": {
+        "token_count_mode": "off",
+        "tokenizer_path": "",
+        "tokenizer_model": "deepseek-chat",
+        "max_token_difference": 2
+      },
+      "require_api_key": true,
+      "allow_placeholder": false,
+      "disable_tls_verify_on_windows": false,
+      "ca_bundle_path": "config/certs/mozilla-ca-bundle.pem"
     },
-    "require_api_key": true,
-    "allow_placeholder": false,
-    "disable_tls_verify_on_windows": false,
-    "ca_bundle_path": "config/certs/mozilla-ca-bundle.pem"
+    "jev": {
+      "endpoint": "",
+      "api_key_env": "AGENT_JEV_API_KEY",
+      "api_key_file": "",
+      "timeout_ms": 30000,
+      "ca_bundle_path": "config/certs/mozilla-ca-bundle.pem"
+    }
   },
   "skills": {
     "enabled": true,

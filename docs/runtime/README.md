@@ -8,6 +8,7 @@
 - [部署指南](DEPLOYMENT.md)
 - [扩展 AgentLoom](EXTENDING_AGENTLOOM.md)
 - [独立子 Agent 运行时](SUBAGENT_RUNTIME.md)
+- [Jev System One 协议与开发端点](JEV_PROTOCOL.md)
 - [Net API Notes](NET_API_NOTES.md)
 - [Callback 生命周期与优雅停服](CALLBACK_LIFETIME_SHUTDOWN.md)
 - [Async gRPC Runtime](async_grpc_runtime.md)

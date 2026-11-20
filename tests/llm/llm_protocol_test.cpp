@@ -304,6 +304,27 @@ TEST_P(ProtocolTransportTest, DefaultProtocolMatchesLegacyBytesOverBothTransport
     EXPECT_EQ(request.headers[1].value, "Bearer test-key");
 }
 
+TEST_P(ProtocolTransportTest, JevDecodesNamedChoicesThroughSharedClient) {
+    RecordingTransport transport;
+    transport.body = R"({"model":"fixture-model","answers":{"budget":{"type":"choice","choice":"unknown","confidence":0.8,"probabilities":{"known":0.1,"unknown":0.9}}}})";
+    ChatCompletionRequest request;
+    request.jev.emplace();
+    request.jev->state_json = R"({"turn":"example"})";
+    request.jev->questions["budget"] = {"是否已确定预算", {{"known","已知"},{"unknown","未知"}}};
+    const auto options = Options(std::make_shared<JevProtocol>());
+    auto result = Complete(options, transport, request);
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    ASSERT_EQ(transport.requests.size(), 1u);
+    EXPECT_EQ(transport.requests.front().url, "http://example.invalid/v1/systemone");
+    EXPECT_EQ(nlohmann::json::parse(transport.requests.front().body)["state"]["turn"], "example");
+    EXPECT_EQ(result.value().jev_answers.at("budget").choice, "unknown");
+    auto malformed = nlohmann::json::parse(transport.body);
+    malformed["answers"]["budget"]["choice"] = "undeclared";
+    transport.body = malformed.dump();
+    auto invalid = Complete(options, transport, request);
+    EXPECT_EQ(invalid.status().code(), core::ErrorCode::DataLoss);
+}
+
 TEST_P(ProtocolTransportTest, UsesInjectedEndpointEncoderAndDecoder) {
     RecordingTransport transport;
     transport.body = "raw-payload";

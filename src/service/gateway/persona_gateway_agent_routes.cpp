@@ -6,6 +6,102 @@ namespace {
 
 using namespace route_detail;
 
+DECLARE_AUTHENTICATED_HTTP_ROUTE(JevDevelopmentRoute, ::net::http::verb::post, "v1", "systemone") {
+    if (!context.forward_jev) {
+        SendJson(context.request, ::net::http::status::service_unavailable,
+                 {{"error", "Jev upstream is not configured"}}, context.trace_id);
+        return;
+    }
+    context.forward_jev(context.request);
+}
+
+DECLARE_AUTHENTICATED_HTTP_ROUTE(OpenAiTurnRoute, ::net::http::verb::post, "v1", "chat", "completions") {
+    const auto& body = context.body;
+    auto fail = [&](const core::Status& status) {
+        SendJson(context.request, HttpStatusFor(status.code()),
+                 {{"error", {{"message", status.message()}, {"type", "invalid_request_error"}}}}, context.trace_id);
+    };
+    const auto session = context.message["X-Session-Id"];
+    if (session.empty() || !body.is_object() || !body.contains("messages") ||
+        !body["messages"].is_array() || body["messages"].empty() || !body.contains("model") ||
+        !body["model"].is_string() || (body.contains("stream") && !body["stream"].is_boolean())) {
+        fail(core::Status::Error(core::ErrorCode::InvalidArgument, "X-Session-Id, model and messages are required"));
+        return;
+    }
+    const auto& last = body["messages"].back();
+    if (!last.is_object() || !last.contains("role") || last["role"] != "user" ||
+        !last.contains("content") || !last["content"].is_string()) {
+        fail(core::Status::Error(core::ErrorCode::InvalidArgument, "last message must contain user text"));
+        return;
+    }
+    ChatGatewayRequest turn;
+    turn.trace_id = context.trace_id;
+    turn.session_id = std::string(session);
+    turn.authenticated_user_uuid = context.identity.user_uuid;
+    turn.message = last["content"].get<std::string>();
+    turn.model = body["model"].get<std::string>();
+    turn.stream = body.value("stream", false);
+    if (auto mode = context.message["X-Turn-Mode"]; !mode.empty()) turn.mode = std::string(mode);
+    // 人格绑定在会话上，调用者可用头字段确认当前会话是否符合预期。
+    if (auto persona = context.message["X-Persona-Id"]; !persona.empty()) {
+        auto bound = context.service.GetSession(turn.session_id, turn.trace_id, turn.authenticated_user_uuid);
+        if (!bound.ok()) { fail(bound.status()); return; }
+        if (bound.value().session.persona_id != std::string(persona)) {
+            fail(core::Status::Error(core::ErrorCode::InvalidArgument, "persona does not match session"));
+            return;
+        }
+    }
+    const auto trace = context.trace_id;
+    const auto created = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Json envelope{{"id", "chatcmpl-" + trace}, {"created", created}, {"model", turn.model},
+                  {"object", turn.stream ? "chat.completion.chunk" : "chat.completion"}};
+    if (turn.stream) {
+        auto options = context.service.StreamOptions();
+        options.require_pong = false;
+        // 标准客户端断开 SSE 后按本次 trace 取消 Turn，避免影响同会话随后提交的轮次。
+        auto opened = context.request->BeginEventStream(options,
+            [service = std::ref(context.service), session_id = turn.session_id,
+             owner = turn.authenticated_user_uuid, trace](core::Status closed) {
+                if (!closed.ok()) service.get().CancelChat(session_id, owner, trace);
+            });
+        if (!opened.ok()) { fail(opened.status()); return; }
+        auto stream = opened.value();
+        auto chunk = [stream, envelope](Json delta, Json reason) mutable {
+            envelope["choices"] = Json::array({{{"index", 0}, {"delta", std::move(delta)}, {"finish_reason", std::move(reason)}}});
+            return stream->SendEvent({{}, envelope.dump(), {}});
+        };
+        auto started = chunk({{"role","assistant"}}, nullptr);
+        if (!started.ok()) { stream->AbortEvents(started); return; }
+        turn.event_sink = [chunk](const llm::LlmStreamEvent& event) mutable {
+            if (event.kind != llm::LlmStreamEventKind::TextDelta) return core::Status::Ok();
+            return chunk({{"content", event.text}}, nullptr);
+        };
+        auto finish = [stream, chunk](core::Result<ChatGatewayResponse> result) mutable {
+            auto status = result.ok() ? chunk(Json::object(), "stop") :
+                stream->SendEvent({{}, Json{{"error", {{"message", result.status().message()}}}}.dump(), {}});
+            if (status.ok()) status = stream->SendEvent({{}, "[DONE]", {}});
+            if (status.ok()) stream->FinishEvents();
+            else stream->AbortEvents(status);
+        };
+        auto status = context.service.SubmitChat(std::move(turn), finish);
+        if (!status.ok()) finish(status);
+        return;
+    }
+    auto status = context.service.SubmitChat(std::move(turn),
+        [http = context.request, trace, envelope](core::Result<ChatGatewayResponse> result) mutable {
+            if (!result.ok()) {
+                SendJson(http, HttpStatusFor(result.status().code()),
+                         {{"error", {{"message", result.status().message()}}}}, trace);
+                return;
+            }
+            envelope["choices"] = Json::array({{{"index", 0}, {"finish_reason", "stop"},
+                {"message", {{"role", "assistant"}, {"content", result.value().content}}}}});
+            SendJson(http, ::net::http::status::ok, envelope, trace);
+        });
+    if (!status.ok()) fail(status);
+}
+
 DECLARE_HTTP_ROUTE(AuthMeRoute, ::net::http::verb::get, "api", "auth", "me") {
     Json body{
         {"ok", true},

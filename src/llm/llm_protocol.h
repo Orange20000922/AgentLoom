@@ -72,4 +72,17 @@ public:
         const ChatCompletionRequest& request, const LlmProtocolContext& context) const override;
 };
 
+// TypeSafe System One 的 choice 协议。与聊天协议共享客户端及在途请求生命周期。
+class JevProtocol final : public ILlmProtocol {
+public:
+    std::string_view Endpoint() const noexcept override { return "systemone"; }
+    LlmProtocolCapabilities Capabilities() const noexcept override { return {}; }
+    core::Status ValidateRequest(const ChatCompletionRequest& request) const override;
+    core::Result<std::string> EncodeRequest(
+        const ChatCompletionRequest& request, const LlmProtocolContext& context) const override;
+    core::Result<ChatCompletionResponse> DecodeResponse(
+        std::string_view body, const ChatCompletionRequest& request,
+        const LlmProtocolContext& context, core::LoggerAdapter& logger) const override;
+};
+
 }
