@@ -135,6 +135,15 @@ struct LlmOptions {
     std::unordered_map<std::string, std::filesystem::path> prompts;
 };
 
+struct JevProxyOptions {
+    std::string endpoint;
+    std::string api_key_env = "AGENT_JEV_API_KEY";
+    std::string api_key_file;
+    std::string api_key;
+    std::string ca_bundle_path;
+    int timeout_ms = 30000;
+};
+
 struct LoggingConfigOptions {
     std::filesystem::path log_dir = "../logs/persona_gateway_e2e";
     std::string logger_name = "agent_gateway_server";
@@ -454,6 +463,8 @@ struct MultimodalServerOptions {
     BertRuntimeConfigOptions bert_runtime;
     EmbeddingModelOptions embedding;
     LlmOptions llm;
+    bool enable_llm_dev_routes = false;
+    JevProxyOptions jev;
     LoggingConfigOptions logging;
     LocalLlmConfigOptions local_llm;
     EmotionAnalyzerConfigOptions emotion_analyzer;

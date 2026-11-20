@@ -174,6 +174,22 @@ TEST(ConfigLlmSectionTest, LoadsAuditTokenValidationOptions) {
     EXPECT_EQ(options.llm.response_max_token_difference, 4u);
 }
 
+TEST(ConfigLlmSectionTest, ResolvesJevKeySeparatelyFromOpenAi) {
+    ScopedTempDirectory tmp("llm_dev_routes");
+    const auto config_file = tmp.path() / "config.json";
+    WriteFile(tmp.path() / "jev.key", "test-key\n");
+    WriteFile(config_file, R"({"llm":{
+        "enable_dev_routes":true,
+        "openai":{"enabled":false,"model":"turn-model"},
+        "jev":{"endpoint":"http://127.0.0.1/v1/systemone","api_key_env":"","api_key_file":"jev.key"}
+    }})");
+    auto options = Parse({"server", "--llm", "llm.gguf", "--config", config_file.string()});
+    EXPECT_TRUE(options.enable_llm_dev_routes);
+    EXPECT_EQ(options.jev.api_key, "test-key");
+    EXPECT_EQ(options.llm.model, "turn-model");
+    EXPECT_TRUE(options.llm.api_key.empty());
+}
+
 TEST(ConfigOptionParserTest, ParsesCliFallbackOptionsThroughSections) {
     auto options = Parse({
         "server",

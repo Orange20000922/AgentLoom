@@ -136,6 +136,7 @@ protected:
         dependencies.memory_provider = memory_;
         dependencies.emotion_analyzer = emotion_;
         gateway::PersonaGatewayServerOptions options;
+        options.enable_llm_dev_routes = true;
         options.http.address = "127.0.0.1"; options.http.port = 0; options.http.io_threads = 2;
         options.compute_pool.worker_count = 2; options.compute_pool.queue_capacity = 32;
         options.io_pool.worker_count = 2; options.io_pool.queue_capacity = 32;
@@ -178,7 +179,7 @@ protected:
         if (!cookie_.empty()) request.headers.push_back({"Cookie", cookie_});
         return sync_http_->Execute(request);
     }
-    std::shared_ptr<Reader> Read(std::string trace, std::string last_id = {}, bool resume = false) {
+    std::shared_ptr<Reader> Read(std::string trace, std::string last_id = {}, bool resume = false, bool openai = false) {
         auto reader = std::make_shared<Reader>();
         std::weak_ptr<Reader> weak = reader;
         reader->decoder.emplace([weak](const auto& event) {
@@ -194,6 +195,12 @@ protected:
         request.headers = {{"Cookie", cookie_}, {"Content-Type", "application/json"}, {"X-Trace-Id", trace}};
         if (!last_id.empty()) request.headers.push_back({"Last-Event-ID", last_id});
         if (!resume) request.body = Json{{"sessionId", "stream-session"}, {"message", "say hello"}, {"stream", true}}.dump();
+        if (openai) {
+            request.url = Url("/v1/chat/completions");
+            request.headers.push_back({"X-Session-Id", "stream-session"});
+            request.body = Json{{"model","fake"}, {"stream",true},
+                {"messages",Json::array({{{"role","user"},{"content","say hello"}}})}}.dump();
+        }
         auto submitted = async_http_->ExecuteStreamingAsync(request, {}, {
             .on_headers = [](const auto& headers) {
                 return headers.status == 200 ? core::Status::Ok()
@@ -254,6 +261,27 @@ TEST_F(GatewayStreamingTest, VisibleDeltaPrecedesSingleCommitAndSameSessionRemai
         EXPECT_EQ(data.at("sequence").get<std::uint64_t>(), ++sequence);
     }
     EXPECT_TRUE(Json::parse(events.back().data).at("committed").get<bool>());
+}
+
+TEST_F(GatewayStreamingTest, OpenAiChunksCompleteOneTurn) {
+    auto reader = Read("openai-stream", {}, false, true);
+    ASSERT_TRUE(provider_.Wait(1));
+    provider_.Finish(0);
+    ASSERT_EQ(reader->done.wait_for(3s), std::future_status::ready);
+    ASSERT_TRUE(reader->done.get().ok());
+    const auto events = reader->Events();
+    ASSERT_GE(events.size(), 4u);
+    EXPECT_EQ(events.back().data, "[DONE]");
+    std::string reply;
+    for (size_t index = 0; index + 1 < events.size(); ++index) {
+        const auto chunk = Json::parse(events[index].data);
+        EXPECT_EQ(chunk.at("object"), "chat.completion.chunk");
+        const auto& choice = chunk.at("choices").at(0);
+        reply += choice.at("delta").value("content", std::string{});
+        if (index + 2 == events.size()) EXPECT_EQ(choice.at("finish_reason"), "stop");
+    }
+    EXPECT_EQ(reply, "first last");
+    EXPECT_EQ(memory_->admissions.load(), 1);
 }
 
 TEST_F(GatewayStreamingTest, DisconnectCancelsAndReconnectReplaysFailureWithoutNewProviderCall) {

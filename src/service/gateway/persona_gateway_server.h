@@ -85,6 +85,8 @@ struct PersonaGatewayServerOptions {
     GatewayDocumentStoreOptions document_store;
     std::vector<PersonaMetadataRecord> default_personas;
     std::string websocket_path = "/ws/session";
+    bool enable_llm_dev_routes = false;
+    std::function<void(std::shared_ptr<::net::IHttpRequest>)> forward_jev;
 };
 
 struct PersonaGatewayServerDependencies {

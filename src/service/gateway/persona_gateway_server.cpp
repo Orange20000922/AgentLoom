@@ -235,7 +235,9 @@ PersonaGatewayServer::PersonaGatewayServer(PersonaGatewayServerOptions options,
                    .enable_path_register_test_endpoint =
                        options_.document_store.enable_path_register_test_endpoint,
                    .enable_path_analyze_test_endpoint =
-                       options_.document_store.enable_path_analyze_test_endpoint},
+                       options_.document_store.enable_path_analyze_test_endpoint,
+                   .enable_llm_dev_routes = options_.enable_llm_dev_routes,
+                   .forward_jev = options_.forward_jev},
                dependencies_.stateful_skill_router),
       http_server_(ResolveHttpOptions(options_)),
       maintenance_(core::LoggerAdapter::ForModule("gateway")),

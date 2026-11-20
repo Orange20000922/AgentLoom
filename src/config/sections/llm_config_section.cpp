@@ -28,6 +28,16 @@ void LlmConfigSection::LoadJson(const Json& root, MultimodalServerOptions& optio
         return;
     }
 
+    SetBool(*section, Name(), "enable_dev_routes", options.enable_llm_dev_routes);
+    if (const auto* jev = FindSection(*section, "jev")) {
+        SetString(*jev, "llm.jev", "endpoint", options.jev.endpoint);
+        SetString(*jev, "llm.jev", "api_key_env", options.jev.api_key_env);
+        SetString(*jev, "llm.jev", "api_key_file", options.jev.api_key_file);
+        SetString(*jev, "llm.jev", "ca_bundle_path", options.jev.ca_bundle_path);
+        SetInt(*jev, "llm.jev", "timeout_ms", options.jev.timeout_ms, 1000, 600000);
+    }
+    // 未分节的旧配置继续作为 OpenAI 配置读取。
+    if (const auto* openai = FindSection(*section, "openai")) section = openai;
     SetString(*section, Name(), "base_url", options.llm.base_url);
     SetBool(*section, Name(), "enabled", options.llm.enabled);
     SetBool(*section, Name(), "debug_payloads", options.llm.debug_payloads);
@@ -135,6 +145,14 @@ std::filesystem::path ResolveRelativeToConfig(const std::filesystem::path& p,
 }
 
 void LlmConfigSection::Validate(MultimodalServerOptions& options) const {
+    if (options.enable_llm_dev_routes && !options.jev.endpoint.empty()) {
+        if (auto key = ReadKeyFromEnv(options.jev.api_key_env)) {
+            options.jev.api_key = *key;
+        } else if (!options.jev.api_key_file.empty()) {
+            options.jev.api_key = ReadKeyFromFile(ResolveRelativeToConfig(options.jev.api_key_file, options.config_file_path));
+        }
+        if (options.jev.api_key.empty()) throw std::runtime_error("llm.jev 需要代理商密钥");
+    }
     if (options.llm.response_token_count_mode != "off" &&
         options.llm.response_token_count_mode != "audit" &&
         options.llm.response_token_count_mode != "strict") {

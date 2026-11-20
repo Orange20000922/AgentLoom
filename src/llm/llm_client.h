@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -73,6 +74,23 @@ struct ChatMessage {
     std::optional<std::string> reasoning_content;
 };
 
+struct JevChoiceQuestion {
+    std::string instructions;
+    std::map<std::string, std::string> criteria;
+};
+
+struct JevChoiceInput {
+    // state 可为 JSON 字符串、数组或对象。
+    std::string state_json;
+    std::map<std::string, JevChoiceQuestion> questions;
+};
+
+struct JevChoiceAnswer {
+    std::string choice;
+    double confidence;
+    std::map<std::string, double> probabilities;
+};
+
 struct ChatCompletionRequest {
     std::string model;
     std::vector<ChatMessage> messages;
@@ -90,6 +108,7 @@ struct ChatCompletionRequest {
     std::vector<Tool> tools;
     std::string tool_choice; // 空串遵循 Provider 默认，另支持 none/auto/required。
     std::optional<bool> parallel_tool_calls;
+    std::optional<JevChoiceInput> jev;
 };
 
 struct ChatCompletionResponse {
@@ -102,6 +121,7 @@ struct ChatCompletionResponse {
     std::vector<ChatToolCall> tool_calls;
     std::string finish_reason;
     std::optional<std::string> reasoning_content;
+    std::map<std::string, JevChoiceAnswer> jev_answers;
 };
 
 class ICompletionTokenCounter {

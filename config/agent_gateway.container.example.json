@@ -69,21 +69,31 @@
     "generate_dev_keys": true
   },
   "llm": {
-    "enabled": true,
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key_env": "AGENT_LLM_API_KEY",
-    "api_key_file": "",
-    "model": "deepseek-chat",
-    "timeout_ms": 30000,
-    "max_retries": 2,
-    "async_http_io_threads": 4,
-    "http_keep_alive": true,
-    "http_max_idle_connections": 128,
-    "http_max_idle_connections_per_origin": 64,
-    "http_idle_timeout_ms": 30000,
-    "require_api_key": true,
-    "allow_placeholder": false,
-    "disable_tls_verify_on_windows": false
+    "enable_dev_routes": false,
+    "openai": {
+      "enabled": true,
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "AGENT_LLM_API_KEY",
+      "api_key_file": "",
+      "model": "deepseek-chat",
+      "timeout_ms": 30000,
+      "max_retries": 2,
+      "async_http_io_threads": 4,
+      "http_keep_alive": true,
+      "http_max_idle_connections": 128,
+      "http_max_idle_connections_per_origin": 64,
+      "http_idle_timeout_ms": 30000,
+      "require_api_key": true,
+      "allow_placeholder": false,
+      "disable_tls_verify_on_windows": false
+    },
+    "jev": {
+      "endpoint": "",
+      "api_key_env": "AGENT_JEV_API_KEY",
+      "api_key_file": "",
+      "ca_bundle_path": "",
+      "timeout_ms": 30000
+    }
   },
   "local_llm": {
     "enabled": false,

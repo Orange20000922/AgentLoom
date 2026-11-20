@@ -155,6 +155,7 @@ add_library(agent_llm STATIC
     src/llm/llm_client.cpp
     src/llm/llm_protocol.h
     src/llm/llm_protocol.cpp
+    src/llm/jev_protocol.cpp
     src/llm/chat_completions_stream_decoder.cpp
     src/llm/openai_llm_client.h
     src/llm/openai_llm_client.cpp

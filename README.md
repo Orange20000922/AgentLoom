@@ -251,6 +251,29 @@ Linux 使用独立的 `build/linux-vcpkg-installed`，不会复用或写入 Wind
 bash linux/scripts/verify_package.sh
 ```
 
+## 开发协议端点
+
+`agent_gateway_server` 在 `llm.enable_dev_routes` 为 `true` 时开放以下两个 POST 端点。调用时使用示例服务器签发的 Bearer token 或登录 Cookie。
+
+| 端点 | 调用约定 |
+| --- | --- |
+| `/v1/chat/completions` | 先通过 `/api/session/create` 创建会话，在 `X-Session-Id` 中传入其 ID。请求体提供 `model`、`messages` 和可选的 `stream`。末条消息须为 `user` 文本。此前的轮次由会话保存。回复经过人格、记忆和工具执行流程，返回 Chat Completions JSON 或 SSE。 |
+| `/v1/systemone` | 将 JSON 原文转发到 `llm.jev.endpoint` 指定的完整 URL，返回供应商的 HTTP 状态和响应体。代理商密钥由服务器从 `llm.jev.api_key_env` 或 `api_key_file` 读取。 |
+
+聊天请求可携带 `X-Persona-Id` 核对已绑定的人格，通过 `X-Turn-Mode` 选择该轮使用的上下文模式。会话历史、Skill 注册与工具策略沿用服务器配置。下面是一次续接请求。
+
+```http
+POST /v1/chat/completions HTTP/1.1
+Authorization: Bearer <gateway-token>
+Content-Type: application/json
+X-Session-Id: <session-id>
+X-Persona-Id: <persona-id>
+
+{"model":"deepseek-chat","messages":[{"role":"user","content":"我们接着聊。"}]}
+```
+
+聊天模型配置见 `llm.openai`，已有的平铺 `llm` 配置仍可使用。代理转发和类型化 Jev 客户端用途不同：转发端点保留供应商响应，SDK 调用者使用 `JevProtocol` 和 `OpenAiAsyncLlmClient` 时会校验 choice 选项及概率。
+
 ## 配置与启动
 
 配置系统使用 JSON section，并允许 CLI 覆盖。实际字段以 `src/config/sections/` 和公开样例为准：

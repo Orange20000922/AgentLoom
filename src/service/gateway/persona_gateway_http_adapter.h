@@ -23,6 +23,8 @@ struct PersonaGatewayHttpAdapterOptions {
     bool enable_dev_registration = false;
     bool enable_path_register_test_endpoint = false;
     bool enable_path_analyze_test_endpoint = false;
+    bool enable_llm_dev_routes = false;
+    std::function<void(std::shared_ptr<::net::IHttpRequest>)> forward_jev;
 };
 
 class PersonaGatewayHttpAdapter {

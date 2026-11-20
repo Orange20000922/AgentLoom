@@ -999,6 +999,52 @@ int main(int argc, char** argv) {
 
         auto config = ParseMultimodalOptions(argc, argv);
         auto gateway_options = ToPersonaGatewayServerOptions<agent::service::gateway::PersonaGatewayServerOptions, net::StaticFileOptions>(config);
+        gateway_options.enable_llm_dev_routes = config.enable_llm_dev_routes;
+        if (config.enable_llm_dev_routes && gateway_options.http.address != "127.0.0.1" &&
+            gateway_options.http.address != "::1" && gateway_options.http.address != "localhost" &&
+            (!gateway_options.auth.enabled || !gateway_options.auth.require_auth_for_api ||
+             gateway_options.auth.allow_dev_identity)) {
+            return Fail("开发协议路由绑定非回环地址时需要启用 API 认证并关闭开发身份");
+        }
+        if (config.enable_llm_dev_routes && !config.jev.endpoint.empty()) {
+            agent::net::TlsClientOptions tls;
+            if (!config.jev.ca_bundle_path.empty()) {
+                tls.ca_bundle_path = (config.config_file_path.parent_path() / config.jev.ca_bundle_path).string();
+            }
+            auto tls_context = agent::net::TlsContext::CreateClient(tls);
+            if (!tls_context.ok()) return Fail(tls_context.status().message());
+            agent::net::AsyncBeastHttpClientOptions options;
+            options.tls_context = std::move(tls_context).value();
+            auto transport = agent::net::AsyncBeastHttpClient::Create(std::move(options));
+            if (!transport.ok()) return Fail(transport.status().message());
+            // 固定上游地址，只发送该供应商的凭据。来访 Authorization 属于 SDK 网关。
+            gateway_options.forward_jev = [http = std::shared_ptr<agent::net::IAsyncHttpClient>(std::move(transport).value()),
+                                           settings = config.jev](std::shared_ptr<::net::IHttpRequest> incoming) {
+                agent::net::HttpClientRequest upstream;
+                upstream.url = settings.endpoint;
+                upstream.timeout_ms = settings.timeout_ms;
+                upstream.headers = {{"Authorization", "Bearer " + settings.api_key}, {"Content-Type", "application/json"}};
+                upstream.body = incoming->message().body();
+                auto finish = [incoming](core::Result<agent::net::HttpClientResponse> result) {
+                    if (!result.ok()) {
+                        incoming->Respond(::net::HttpResponse::Json(::net::http::status::bad_gateway,
+                            R"({"error":"Jev upstream request failed"})").message);
+                        return;
+                    }
+                    auto response = std::move(result).value();
+                    auto reply = ::net::HttpResponse::Json(static_cast<::net::http::status>(response.status),
+                                                           std::move(response.body)).message;
+                    for (const auto& header : response.headers) {
+                        auto field = ::net::http::string_to_field(header.name);
+                        if (field == ::net::http::field::content_type || field == ::net::http::field::retry_after)
+                            reply.set(field, header.value);
+                    }
+                    incoming->Respond(std::move(reply));
+                };
+                auto started = http->ExecuteAsync(std::move(upstream), finish);
+                if (!started.ok()) finish(started.status());
+            };
+        }
         gateway_options.embedding_batch.enabled = config.embedding.batch_enabled;
         gateway_options.embedding_batch.max_pending_requests =
             config.embedding.batch_max_pending_requests;

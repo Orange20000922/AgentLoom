@@ -276,6 +276,7 @@ core::Result<ChatCompletionResponse> ParseResponse(
 }
 
 core::Status ChatCompletionsProtocol::ValidateRequest(const ChatCompletionRequest& request) const {
+    if (request.jev) return core::Status(core::ErrorCode::InvalidArgument, "Jev 请求需要选择 Jev 协议");
     const auto invalid = [](const char* reason) {
         return core::Status::Error(core::ErrorCode::InvalidArgument, reason);
     };

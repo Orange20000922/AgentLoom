@@ -860,7 +860,8 @@ bool PersonaGatewayHttpAdapter::IsApiRequest(std::string_view target) noexcept {
     if (q != std::string_view::npos) {
         target = target.substr(0, q);
     }
-    return target == "/api" || target.starts_with("/api/");
+    return target == "/api" || target.starts_with("/api/") ||
+           target == "/v1/chat/completions" || target == "/v1/systemone";
 }
 
 void PersonaGatewayHttpAdapter::CleanupUnfinishedDocumentUploadsForConnection(std::uint64_t connection_id) {
@@ -893,6 +894,12 @@ void PersonaGatewayHttpAdapter::HandleHttp(std::shared_ptr<::net::IHttpRequest> 
     }
 
     const auto parts = SplitPath(msg.target());
+    if (!parts.empty() && parts.front() == "v1" && !options_.enable_llm_dev_routes) {
+        const auto trace = TraceFrom(msg);
+        SendJson(request, ::net::http::status::not_found,
+                 ErrorEnvelope(trace, core::Status::Error(core::ErrorCode::NotFound, "route not found")), trace);
+        return;
+    }
     auto parsed = ParseJsonBody(msg);
     const Json* parsed_body = parsed.ok() ? &parsed.value() : nullptr;
     const auto trace_id = TraceFrom(msg, parsed_body);
@@ -941,6 +948,7 @@ void PersonaGatewayHttpAdapter::HandleHttp(std::shared_ptr<::net::IHttpRequest> 
             trace_id,
             parts,
             std::move(params),
+            options_.forward_jev,
         };
         route->Handle(context);
         return;
