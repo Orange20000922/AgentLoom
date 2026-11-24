@@ -16,6 +16,11 @@ core::Result<SessionSnapshot> PersonaInteraction::EnsureSession(
     if (!request.session_id.empty()) {
         auto existing = sessions_.GetSessionSnapshot(request.session_id);
         if (existing.ok()) {
+            const auto tenant = request.tenant_id.empty() ? "default" : request.tenant_id;
+            if (existing.value().tenant_id != tenant) {
+                return core::Status::Error(core::ErrorCode::PermissionDenied,
+                                           "session_id belongs to another tenant");
+            }
             const auto owner_status = ValidateOwner(existing.value(), request.user_uuid);
             if (!owner_status.ok()) {
                 return owner_status;

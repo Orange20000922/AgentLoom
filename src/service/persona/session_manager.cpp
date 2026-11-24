@@ -1,5 +1,6 @@
 #include "session_manager.h"
 
+#include <algorithm>
 #include <atomic>
 #include <sstream>
 #include <utility>
@@ -165,6 +166,16 @@ core::Result<SessionSnapshot> SessionManager::CreateSession(CreateSessionRequest
             std::move(request.emotion_prompt_config),
             request.time_awareness);
         slot->state.max_recent_turns = options_.max_recent_turns;
+        if (request.committed_history.size() > request.committed_turn_count) {
+            return core::Status::Error(core::ErrorCode::InvalidArgument,
+                                       "recovery history exceeds committed turn count");
+        }
+        slot->state.metrics.turn_count = request.committed_turn_count;
+        const auto keep = std::min(request.committed_history.size(), options_.max_recent_turns);
+        auto first = request.committed_history.end() - keep;
+        for (; first != request.committed_history.end(); ++first) {
+            slot->state.recent_history.push_back(std::move(*first));
+        }
     }
 
     SessionSnapshot snapshot;
