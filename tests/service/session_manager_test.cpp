@@ -153,6 +153,23 @@ TEST(SessionManagerTest, CreatesTouchesAddsTurnsAndClosesSession) {
     io.Shutdown(true);
 }
 
+TEST(SessionManagerTest, RestoresOnlyTheRecentWindowAndPreservesCommittedCount) {
+    core::ThreadPool compute({1, 8, "test-compute"});
+    core::ThreadPool io({1, 8, "test-io"});
+    SessionOptions options;
+    options.max_recent_turns = 1;
+    SessionManager manager(compute, io, options);
+    auto request = MakeCreateRequest();
+    request.committed_turn_count = 8;
+    request.committed_history = {{.user_input = "a", .response = "1"},
+                                 {.user_input = "b", .response = "2"}};
+    auto created = manager.CreateSession(std::move(request));
+    ASSERT_TRUE(created.ok()) << created.status().message();
+    EXPECT_EQ(created.value().recent_turn_count, 1u);
+    EXPECT_EQ(created.value().metrics.turn_count, 8u);
+    EXPECT_EQ(created.value().metrics.request_count, 0u);
+}
+
 TEST(SessionManagerTest, TransfersFromLockedComputeTaskToIoWithoutRelockingAdmission) {
     core::ThreadPool compute({1, 8, "test-compute"});
     core::ThreadPool io({1, 8, "test-io"});

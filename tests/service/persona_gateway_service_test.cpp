@@ -275,8 +275,14 @@ TEST(PersonaInteractionTest, EnsuresSessionAndEnforcesTrustedOwner) {
 
     auto created = interaction.EnsureSession(create);
     ASSERT_TRUE(created.ok()) << created.status().message();
+    auto other = create;
+    other.tenant_id = "another-tenant";
+    EXPECT_EQ(interaction.EnsureSession(std::move(other)).status().code(), core::ErrorCode::PermissionDenied);
+    create.committed_history = {{.user_input = "旧问题", .response = "旧回复"}};
+    create.committed_turn_count = 1;
     auto ensured = interaction.EnsureSession(std::move(create));
     ASSERT_TRUE(ensured.ok()) << ensured.status().message();
+    EXPECT_EQ(ensured.value().recent_turn_count, 0u);
     EXPECT_EQ(fixture.sessions.SessionCount(), 1u);
 
     // Application 使用的公共 PersonaInteraction 边界必须保留 Runtime 返回的协议用量。

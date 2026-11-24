@@ -85,6 +85,9 @@ struct CreateSessionRequest {
     std::optional<EmotionPromptConfig> emotion_prompt_config;
     EmotionStateConfig emotion_state_config;
     bool time_awareness = true;
+    // 仅在新建会话时装入已提交问答；序号也包含已移出近期窗口的轮次。
+    std::vector<ConversationTurn> committed_history;
+    std::uint64_t committed_turn_count = 0;
 };
 
 struct SessionSnapshot {
